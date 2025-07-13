@@ -70,7 +70,7 @@ pub struct SyscallTable {
 }
 
 impl SyscallTable {
-    pub const ENTRIES: usize = 512;
+    pub const ENTRIES: usize = 4096;
     /// 获取系统调用处理函数
     pub fn get(&self, nr: usize) -> Option<&'static SyscallHandle> {
         *self.entries.get(nr)?
