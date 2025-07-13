@@ -355,3 +355,4 @@ pub const SYS_WAIT4: usize = 61;
 pub const SYS_WAITID: usize = 247;
 pub const SYS_WRITE: usize = 1;
 pub const SYS_WRITEV: usize = 20;
+pub const SYS_2333: usize = 2333;
