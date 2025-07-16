@@ -300,6 +300,7 @@ pub const SYS_WAIT4: usize = 260;
 pub const SYS_WAITID: usize = 95;
 pub const SYS_WRITE: usize = 64;
 pub const SYS_WRITEV: usize = 66;
+pub const SYS_2333: usize = 2333;
 
 // ===以下是为了代码一致性，才定义的调用号===
 

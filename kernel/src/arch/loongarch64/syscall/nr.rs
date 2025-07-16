@@ -301,6 +301,7 @@ pub const SYS_LANDLOCK_RESTRICT_SELF: usize = 446;
 pub const SYS_PROCESS_MRELEASE: usize = 448;
 pub const SYS_FUTEX_WAITV: usize = 449;
 pub const SYS_SET_MEMPOLICY_HOME_NODE: usize = 450;
+pub const SYS_2333: usize = 2333;
 
 // ===以下是为了代码一致性，才定义的调用号===
 
