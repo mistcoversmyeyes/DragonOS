@@ -5,9 +5,18 @@
 # 该脚本会自动下载musl交叉编译工具链，并将其添加到PATH中
 #########################################################################
 
+
+# 定义脚本执行时收到中断后的行为: 脚本运行时接收到信号退出时清理下载的文件
+trap_handler(){
+    rm -f $MUSL_GCC_X86_64_TAR
+    rm -f $MUSL_GCC_RISCV64_TAR
+    rm -f $LA64_GCC_TAR
+}
+
+trap trap_handler EXIT
+trap trap_handler SIGINT
+
 export USE_GITHUB=${USE_GITHUB:=0}
-
-
 
 MUSL_GCC_DATE="231114"
 MUSL_GCC_VERSION="9.4.0"
@@ -52,16 +61,6 @@ get_shell_rc_file()
     fi
 }
 
-# 信号退出时清理下载的文件
-trap_handler(){
-    rm -f $MUSL_GCC_X86_64_TAR
-    rm -f $MUSL_GCC_RISCV64_TAR
-    rm -f $LA64_GCC_TAR
-}
-
-trap trap_handler EXIT
-trap trap_handler SIGINT
-
 
 SHELL_RC=$(get_shell_rc_file)
 source $SHELL_RC
@@ -80,10 +79,8 @@ install_loongarch64_gcc()
     rm -rf $LA64_GCC_TAR || exit 1
 }
 
-# 下载musl交叉编译工具链
-
-# 如果x86_64-linux-musl-gcc或x86_64-linux-musl-g++不存在，则下载
-if [ ! -n "$(which x86_64-linux-musl-gcc)" ] || [ ! -n "$(which x86_64-linux-musl-g++)" ]; then
+install_x86_64_musl_gcc()
+{
     echo "开始下载x86_64-linux-musl-gcc"
     wget ${MUSL_GCC_X86_64_DOWNLOAD_URL} || exit 1
     echo "下载完成"
@@ -94,12 +91,9 @@ if [ ! -n "$(which x86_64-linux-musl-gcc)" ] || [ ! -n "$(which x86_64-linux-mus
     echo "开始清理x86_64-linux-musl-gcc的下载缓存"
     rm -rf $MUSL_GCC_X86_64_TAR || exit 1
     echo "清理完成"
-else
-    echo "x86_64-linux-musl-gcc已经安装"
-fi
+}    
 
-# 如果riscv64-linux-musl-gcc或riscv64-linux-musl-g++不存在，则下载
-if [ ! -n "$(which riscv64-linux-musl-gcc)" ] || [ ! -n "$(which riscv64-linux-musl-g++)" ]; then
+install_riscv64_musl_gcc(){
     echo "开始下载riscv64-linux-musl-gcc"
     wget ${MUSL_GCC_RISCV64_DOWNLOAD_URL} || exit 1
     echo "下载完成"
@@ -110,10 +104,25 @@ if [ ! -n "$(which riscv64-linux-musl-gcc)" ] || [ ! -n "$(which riscv64-linux-m
     echo "开始清理riscv64-linux-musl-gcc的下载缓存"
     rm -rf $MUSL_GCC_RISCV64_TAR || exit 1
     echo "清理完成"
+}
+
+# 下载musl交叉编译工具链
+
+# 如果x86_64-linux-musl-gcc或x86_64-linux-musl-g++不存在，则下载
+if [ ! -n "$(which x86_64-linux-musl-gcc)" ] || [ ! -n "$(which x86_64-linux-musl-g++)" ]; then
+    install_x86_64_musl_gcc || exit 1
+else
+    echo "x86_64-linux-musl-gcc已经安装"
+fi
+
+# 如果riscv64-linux-musl-gcc或riscv64-linux-musl-g++不存在，则下载
+if [ ! -n "$(which riscv64-linux-musl-gcc)" ] || [ ! -n "$(which riscv64-linux-musl-g++)" ]; then
+    install_riscv64_musl_gcc || exit 1
 else
     echo "riscv64-linux-musl-gcc已经安装"
 fi
 
+# 如果longarch64-unknown-linux-gun-gcc不存在，则下载
 if [ ! -n "$(which loongarch64-unknown-linux-gnu-gcc)" ] || [ ! -n "$(which loongarch64-unknown-linux-gnu-g++)" ]; then
     install_loongarch64_gcc || exit 1
 else
