@@ -20,10 +20,7 @@ use table::{syscall_table, syscall_table_init};
 use crate::{
     arch::interrupt::TrapFrame,
     mm::{verify_area, VirtAddr},
-    time::{
-        syscall::{PosixTimeZone, PosixTimeval},
-        PosixTimeSpec,
-    },
+    time::PosixTimeSpec,
 };
 
 use self::{
@@ -128,14 +125,6 @@ impl Syscall {
             SYS_SBRK => {
                 let incr = args[0] as isize;
                 crate::mm::syscall::sys_sbrk::sys_sbrk(incr)
-            }
-
-            SYS_REBOOT => {
-                let magic1 = args[0] as u32;
-                let magic2 = args[1] as u32;
-                let cmd = args[2] as u32;
-                let arg = args[3];
-                Self::reboot(magic1, magic2, cmd, arg)
             }
 
             SYS_CLOCK => Self::clock(),
@@ -297,11 +286,6 @@ impl Syscall {
             SYS_GETPEERNAME => {
                 Self::getpeername(args[0], args[1] as *mut SockAddr, args[2] as *mut u32)
             }
-            SYS_GETTIMEOFDAY => {
-                let timeval = args[0] as *mut PosixTimeval;
-                let timezone_ptr = args[1] as *mut PosixTimeZone;
-                Self::gettimeofday(timeval, timezone_ptr)
-            }
 
             SYS_FUTEX => {
                 let uaddr = VirtAddr::new(args[0]);
@@ -371,11 +355,6 @@ impl Syscall {
 
             SYS_PPOLL => Self::ppoll(args[0], args[1] as u32, args[2], args[3]),
 
-            SYS_TKILL => {
-                warn!("SYS_TKILL has not yet been implemented");
-                Ok(0)
-            }
-
             SYS_SIGALTSTACK => {
                 warn!("SYS_SIGALTSTACK has not yet been implemented");
                 Ok(0)
@@ -391,12 +370,6 @@ impl Syscall {
 
                 let user_buf = user_buffer_writer.buffer(0)?;
                 Self::do_syslog(syslog_action_type, user_buf, len)
-            }
-
-            SYS_CLOCK_GETTIME => {
-                let clockid = args[0] as i32;
-                let timespec = args[1] as *mut PosixTimeSpec;
-                Self::clock_gettime(clockid, timespec)
             }
 
             SYS_SYSINFO => {
@@ -447,12 +420,6 @@ impl Syscall {
             }
 
             #[cfg(target_arch = "x86_64")]
-            SYS_ALARM => {
-                let second = args[0] as u32;
-                Self::alarm(second)
-            }
-
-            #[cfg(target_arch = "x86_64")]
             SYS_EVENTFD => {
                 let initval = args[0] as u32;
                 Self::sys_eventfd(initval, 0)
@@ -477,14 +444,20 @@ impl Syscall {
                 let flags = args[4] as u32;
                 Self::sys_perf_event_open(attr, pid, cpu, group_fd, flags)
             }
-            #[cfg(any(target_arch = "x86_64", target_arch = "riscv64"))]
-            SYS_SETRLIMIT => Ok(0),
 
             SYS_RT_SIGTIMEDWAIT => {
                 log::warn!("SYS_RT_SIGTIMEDWAIT has not yet been implemented");
                 Ok(0)
             }
-            _ => panic!("Unsupported syscall ID: {}", syscall_num),
+            _ => {
+                log::error!(
+                    "Unsupported syscall ID: {} -> {}, args: {:?}",
+                    syscall_num,
+                    syscall_number_to_str(syscall_num),
+                    args
+                );
+                Err(SystemError::ENOSYS)
+            }
         };
 
         return r;

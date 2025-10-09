@@ -263,11 +263,18 @@ pub struct LoopbackInterface {
     locked_kobj_state: LockedKObjectState,
 }
 
-#[derive(Debug)]
 pub struct InnerLoopbackInterface {
     netdevice_common: NetDeviceCommonData,
     device_common: DeviceCommonData,
     kobj_common: KObjectCommonData,
+}
+
+impl Debug for LoopbackInterface {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("LoopbackInterface")
+            .field("common", &self.common)
+            .finish()
+    }
 }
 
 impl LoopbackInterface {
