@@ -121,6 +121,8 @@ int test_pwritev_beyond_eof() {
     // 写入少量初始数据
     const char *init_data = "START";
     write(fd, init_data, strlen(init_data));
+    printf("Have written serveral initial data\n");
+
     
     // 在远超文件末尾的位置写入
     char buf1[] = "FAR";
@@ -131,7 +133,38 @@ int test_pwritev_beyond_eof() {
     iov[0].iov_len = strlen(buf1);
     iov[1].iov_base = buf2;
     iov[1].iov_len = strlen(buf2);
+
+    printf("Have initial iov\n");
     
+    // TODO:修复下面这段代码的 SystemError::ENOSPC 错误
+    // === Test 2: Write beyond EOF ===
+    // [ ERROR ] (src/debug/panic/mod.rs:43)    Kernel Panic Occurred. raw_pid: 3
+    // Location:
+    //         File: src/mm/page.rs
+    //         Line: 398, Column: 18
+    // Message:
+    //         called `Result::unwrap()` on an `Err` value: ENOSPC
+    // Rust Panic Backtrace:
+    // [1] function:_Unwind_Backtrace()        (+) 0051 address:0xffff80000044aad3
+    // [2] function:dragonos_kernel::debug::panic::hook::print_stack_trace()   (+) 0215 address:0xffff80000028e337
+    // [3] function:__rustc::rust_begin_unwind()       (+) 0794 address:0xffff800000400eda
+    // [4] function:core::panicking::panic_fmt()       (+) 0029 address:0xffff800000502ced
+    // [5] function:core::result::unwrap_failed()      (+) 0131 address:0xffff800000500433
+    // [6] function:dragonos_kernel::mm::page::PageReclaimer::page_writeback()         (+) 3069 address:0xffff80000058ed5d
+    // [7] function:dragonos_kernel::mm::page::page_reclaim_thread()   (+) 2050 address:0xffff80000058dac2
+    // [8] function:dragonos_kernel::process::kthread::kernel_thread_bootstrap_stage2()        (+) 0939 address:0xffff8000002a41eb
+    // [ ERROR ] (src/arch/x86_64/interrupt/trap.rs:347)        do_general_protection(13),     Error code: 0x0,        rsp: 0xffff8000017)
+    // Refers to a descriptor in the GDT or the current LDT;
+    // Refers to a descriptor in the current GDT;
+
+    // Segment Selector Index: 0x0
+
+    // [ ERROR ] (src/debug/panic/mod.rs:43)    Kernel Panic Occurred. raw_pid: 3
+    // Location:
+    //         File: src/arch/x86_64/interrupt/trap.rs
+    //         Line: 361, Column: 5
+    // Message:
+    //         General Protection
     off_t offset = 100;
     ssize_t pwritten = pwritev(fd, iov, 2, offset);
     if (pwritten < 0) {
