@@ -1,4 +1,5 @@
-use core::ffi::{c_int, c_longlong};
+use core::ffi::{c_int, c_long, c_longlong};
+use num_traits::FromPrimitive;
 use system_error::SystemError;
 
 use crate::syscall::Syscall;
@@ -24,7 +25,9 @@ mod sys_timer_settime;
 pub(crate) use posix_clock::{posix_clock_now, posix_clock_res};
 
 pub type PosixTimeT = c_longlong;
-pub type PosixSusecondsT = c_int;
+/// 在 x86_64 Linux 上，suseconds_t 是 long (64位)，不是 int (32位)
+/// 这确保 struct timeval 的布局与 glibc 一致（共16字节）
+pub type PosixSusecondsT = c_long;
 
 #[repr(C)]
 #[derive(Default, Debug, Copy, Clone)]
