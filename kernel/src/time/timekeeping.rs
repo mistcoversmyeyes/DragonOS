@@ -343,7 +343,7 @@ pub fn do_gettimeofday() -> PosixTimeval {
     let tp = getnstimeofday();
     return PosixTimeval {
         tv_sec: tp.tv_sec,
-        tv_usec: (tp.tv_nsec / 1000) as i32,
+        tv_usec: (tp.tv_nsec / 1000) as i64,
     };
 }
 
