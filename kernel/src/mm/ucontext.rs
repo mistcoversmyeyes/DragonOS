@@ -1199,9 +1199,24 @@ impl InnerAddressSpace {
     /// 取消用户空间内的所有映射
     pub unsafe fn unmap_all(&mut self) {
         let mut flusher: PageFlushAll<MMArch> = PageFlushAll::new();
+        let mut shm_attachments: HashSet<(usize, usize)> = HashSet::new();
         for vma in self.mappings.iter_vmas() {
             if vma.mapped() {
+                {
+                    let guard = vma.lock();
+                    if let (Some(shm_id), Some(attach)) = (guard.shm_id(), guard.shm_attach()) {
+                        shm_attachments.insert((shm_id.data(), attach.data()));
+                    }
+                }
                 vma.unmap(&mut self.user_mapper.utable, &mut flusher);
+            }
+        }
+
+        if !shm_attachments.is_empty() {
+            let ipcns = ProcessManager::current_ipcns();
+            let mut shm_manager_guard = ipcns.shm.lock();
+            for (shm_id, _attach) in shm_attachments {
+                let _ = shm_manager_guard.detach_shm(ShmId::new(shm_id));
             }
         }
     }
@@ -1648,30 +1663,6 @@ impl LockedVMA {
         // 获取物理页的anon_vma的守卫
         let mut page_manager_guard = page_manager_lock();
 
-        // 获取映射的物理地址
-        if let Some((paddr, _flags)) = mapper.translate(guard.region().start()) {
-            // 如果是共享页，执行释放操作
-            let page = page_manager_guard.get(&paddr).unwrap();
-            let _page_guard = page.read();
-            if let Some(shm_id) = guard.shm_id {
-                let ipcns = ProcessManager::current_ipcns();
-                let mut shm_manager_guard = ipcns.shm.lock();
-                if let Some(kernel_shm) = shm_manager_guard.get_mut(&shm_id) {
-                    // 更新最后一次断开连接时间
-                    kernel_shm.update_dtim();
-
-                    // 映射计数减少
-                    kernel_shm.decrease_count();
-
-                    // 释放shm_id
-                    if kernel_shm.map_count() == 0 && kernel_shm.mode().contains(ShmFlags::SHM_DEST)
-                    {
-                        shm_manager_guard.free_id(&shm_id);
-                    }
-                }
-            }
-        }
-
         for page in guard.region.pages() {
             if mapper.translate(page.virt_address()).is_none() {
                 continue;
@@ -1905,6 +1896,8 @@ pub struct VMA {
     provider: Provider,
     /// 关联的 SysV SHM 标识（当此 VMA 来自 shmat 时设置）
     shm_id: Option<ShmId>,
+    /// 关联的 SysV SHM 附着基址（用于识别同一次 shmat 产生的 VMA 片段）
+    shm_attach: Option<VirtAddr>,
     /// 共享匿名映射的稳定身份（用于跨进程共享 futex key）
     pub(crate) shared_anon: Option<Arc<AnonSharedMapping>>,
 }
@@ -2017,6 +2010,7 @@ impl VMA {
             vm_file: file,
             backing_pgoff: pgoff,
             shm_id: None,
+            shm_attach: None,
             shared_anon: None,
         }
     }
@@ -2031,6 +2025,14 @@ impl VMA {
 
     pub fn vm_file(&self) -> Option<Arc<File>> {
         return self.vm_file.clone();
+    }
+
+    pub fn shm_id(&self) -> Option<ShmId> {
+        self.shm_id
+    }
+
+    pub fn shm_attach(&self) -> Option<VirtAddr> {
+        self.shm_attach
     }
 
     pub fn address_space(&self) -> Option<Weak<AddressSpace>> {
@@ -2058,6 +2060,11 @@ impl VMA {
         self.shm_id = shm;
     }
 
+    #[inline(always)]
+    pub fn set_shm_attach(&mut self, attach: Option<VirtAddr>) {
+        self.shm_attach = attach;
+    }
+
     /// # 拷贝当前VMA的内容
     ///
     /// ### 安全性
@@ -2075,6 +2082,7 @@ impl VMA {
             backing_pgoff: self.backing_pgoff,
             vm_file: self.vm_file.clone(),
             shm_id: self.shm_id,
+            shm_attach: self.shm_attach,
             shared_anon: self.shared_anon.clone(),
         };
     }
@@ -2091,6 +2099,7 @@ impl VMA {
             backing_pgoff: self.backing_pgoff,
             vm_file: self.vm_file.clone(),
             shm_id: self.shm_id,
+            shm_attach: self.shm_attach,
             shared_anon: self.shared_anon.clone(),
         };
     }
@@ -2200,7 +2209,9 @@ impl VMA {
             true,
         ));
         if let Some(id) = params.shm_id {
-            r.lock().set_shm_id(Some(id));
+            let mut guard = r.lock();
+            guard.set_shm_id(Some(id));
+            guard.set_shm_attach(Some(params.destination.virt_address()));
         }
 
         // 将VMA加入到anon_vma中
