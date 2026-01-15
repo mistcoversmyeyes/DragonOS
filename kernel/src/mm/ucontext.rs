@@ -321,7 +321,6 @@ impl InnerAddressSpace {
                     kernel_shm.increase_count();
                 }
             }
-
         }
 
         drop(new_guard);

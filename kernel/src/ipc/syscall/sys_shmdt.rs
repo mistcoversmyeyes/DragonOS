@@ -69,8 +69,7 @@ impl Syscall for SysShmdtHandle {
             .iter_vmas()
             .filter_map(|vma| {
                 let vma_guard = vma.lock();
-                if vma_guard.shm_id() == Some(shm_id)
-                    && vma_guard.shm_attach() == Some(shm_attach)
+                if vma_guard.shm_id() == Some(shm_id) && vma_guard.shm_attach() == Some(shm_attach)
                 {
                     Some(vma.clone())
                 } else {
