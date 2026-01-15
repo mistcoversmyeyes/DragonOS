@@ -130,6 +130,7 @@ pub(super) fn do_kernel_shmat(
             let mut vma_guard = vma.lock();
             vma_guard.set_mapped(true);
             vma_guard.set_shm_id(Some(id));
+            vma_guard.set_shm_attach(Some(vaddr));
             drop(vma_guard);
 
             vaddr.data()

@@ -2,7 +2,7 @@ use crate::{
     arch::mm::LockedFrameAllocator,
     libs::align::page_align_up,
     mm::{
-        allocator::page_frame::{FrameAllocator, PageFrameCount, PhysPageFrame},
+        allocator::page_frame::{PageFrameCount, PhysPageFrame},
         page::{page_manager_lock, PageFlags, PageType},
         PhysAddr,
     },
@@ -206,6 +206,39 @@ impl ShmManager {
         self.id_allocator.free(id.0);
     }
 
+    pub fn detach_shm(&mut self, id: ShmId) -> Result<usize, SystemError> {
+        let (start_paddr, size, key, destroy) = {
+            let kernel_shm = self.id2shm.get_mut(&id).ok_or(SystemError::EINVAL)?;
+            kernel_shm.update_dtim();
+            kernel_shm.decrease_count();
+
+            let destroy =
+                kernel_shm.map_count() == 0 && kernel_shm.mode().contains(ShmFlags::SHM_DEST);
+            (
+                kernel_shm.shm_start_paddr,
+                kernel_shm.shm_size,
+                kernel_shm.kern_ipc_perm.key,
+                destroy,
+            )
+        };
+
+        if destroy {
+            let mut cur_phys = PhysPageFrame::new(start_paddr);
+            let count = PageFrameCount::from_bytes(page_align_up(size)).unwrap();
+            let mut page_manager_guard = page_manager_lock();
+            for _ in 0..count.data() {
+                let paddr = cur_phys.phys_address();
+                page_manager_guard.remove_page(&paddr);
+                cur_phys = cur_phys.next();
+            }
+
+            self.free_id(&id);
+            self.free_key(&key);
+        }
+
+        Ok(0)
+    }
+
     pub fn ipc_info(&self, user_buf: *const u8, from_user: bool) -> Result<usize, SystemError> {
         let mut user_buffer_writer = UserBufferWriter::new(
             user_buf as *mut u8,
@@ -341,9 +374,6 @@ impl ShmManager {
             // 释放共享内存物理页
             for _ in 0..count.data() {
                 let paddr = cur_phys.phys_address();
-                unsafe {
-                    LockedFrameAllocator.free(paddr, PageFrameCount::new(1));
-                }
                 // 将已回收的物理页面对应的Page从PAGE_MANAGER中删去
                 page_manager_guard.remove_page(&paddr);
                 cur_phys = cur_phys.next();
