@@ -155,6 +155,13 @@ impl ShmManager {
         }
 
         let id = self.id_allocator.alloc().expect("No more id to allocate.");
+        // TODO: 实现 IPC 序列号机制以防止 ID 重用攻击
+        // 参考 Linux ipc_idr_alloc():
+        // - 跟踪 last_idx，检测 idx 回绕时递增 seq
+        // - 构建最终 ID: (seq << SEQ_SHIFT) | idx
+        // - 在获取对象时验证 seq (ipc_checkid)
+        //
+        // 具体实现方式见 (https://github.com/DragonOS-Community/DragonOS/issues/1678)
         let shm_id = ShmId::new(id);
 
         // 分配共享内存页面
@@ -526,6 +533,8 @@ pub struct KernIpcPerm {
     cgid: usize,
     /// 共享内存段权限模式
     mode: ShmFlags,
+    /// 序列号：用于在 ShmId 被重用的时候进行区分
+    /// TODO: 目前尚未实现该机制，默认为0，具体实现方式见 (https://github.com/DragonOS-Community/DragonOS/issues/1678)
     seq: usize,
 }
 
