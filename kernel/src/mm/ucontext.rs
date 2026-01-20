@@ -1682,12 +1682,11 @@ impl LockedVMA {
 
     pub fn unmap(&self, mapper: &mut PageMapper, mut flusher: impl Flusher<MMArch>) {
         // todo: 如果当前vma与文件相关，完善文件相关的逻辑
-        let mut guard = self.lock();
+        let mut self_guard = self.lock();
 
         // 获取物理页的anon_vma的守卫
         let mut page_manager_guard = page_manager_lock();
-
-        for page in guard.region.pages() {
+        for page in self_guard.region.pages() {
             if mapper.translate(page.virt_address()).is_none() {
                 continue;
             }
@@ -1707,11 +1706,11 @@ impl LockedVMA {
 
             flusher.consume(flush);
         }
-        guard.mapped = false;
+        self_guard.mapped = false;
 
         // 当vma对应共享文件的写映射时，唤醒脏页回写线程
-        if guard.vm_file().is_some()
-            && guard
+        if self_guard.vm_file().is_some()
+            && self_guard
                 .vm_flags()
                 .contains(VmFlags::VM_SHARED | VmFlags::VM_WRITE)
         {

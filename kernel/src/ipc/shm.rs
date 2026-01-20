@@ -213,7 +213,10 @@ impl ShmManager {
     }
 
     pub fn detach_shm(&mut self, id: ShmId) -> Result<usize, SystemError> {
-        let (start_paddr, size, key, destroy) = {
+        // 获取共享内存段的 起始地址、大小、key 和 此次detach后是否需要销毁。
+        // 副作用：更新共享内存段的dtim和映射计数
+        // TODO(mistcoversmyeyes): 修改 KernelShm::map_count 为 shm_nattach ，对齐 linux 语义
+        let (start_paddr, size, key, should_destroy) = {
             let kernel_shm = self.id2shm.get_mut(&id).ok_or(SystemError::EINVAL)?;
             kernel_shm.update_dtim();
             kernel_shm.decrease_count();
@@ -228,7 +231,8 @@ impl ShmManager {
             )
         };
 
-        if destroy {
+        // 如果需要销毁，则释放共享内存段对应的物理页，并从管理器中移除该共享内存段
+        if should_destroy {
             let mut cur_phys = PhysPageFrame::new(start_paddr);
             let count = PageFrameCount::from_bytes(page_align_up(size)).unwrap();
             let mut page_manager_guard = page_manager_lock();
