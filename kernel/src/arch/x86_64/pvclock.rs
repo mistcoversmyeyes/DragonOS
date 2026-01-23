@@ -1,5 +1,6 @@
 use core::sync::atomic::{fence, AtomicU64, AtomicU8, Ordering};
-use x86::time::rdtsc;
+use raw_cpuid::CpuId;
+use x86::time::{rdtsc, rdtscp};
 
 pub const PVCLOCK_TSC_STABLE_BIT: u8 = 1 << 0;
 #[allow(dead_code)]
@@ -35,6 +36,22 @@ pub struct PvclockVsyscallTimeInfo {
 
 static VALID_FLAGS: AtomicU8 = AtomicU8::new(0);
 static LAST_VALUE: AtomicU64 = AtomicU64::new(0);
+// 0 = unknown, 1 = supported, 2 = not supported
+static RDTSCP_AVAILABLE: AtomicU8 = AtomicU8::new(0);
+
+fn has_rdtscp_cpu_feature() -> bool {
+    match RDTSCP_AVAILABLE.load(Ordering::Relaxed) {
+        1 => true,
+        2 => false,
+        _ => {
+            let supported = CpuId::new()
+                .get_extended_processor_and_feature_identifiers()
+                .map_or(false, |info| info.has_rdtscp());
+            RDTSCP_AVAILABLE.store(if supported { 1 } else { 2 }, Ordering::Relaxed);
+            supported
+        }
+    }
+}
 
 pub fn pvclock_set_flags(flags: u8) {
     VALID_FLAGS.store(flags, Ordering::Relaxed);
@@ -90,8 +107,15 @@ pub fn pvclock_read_cycles(src: &PvclockVcpuTimeInfo, tsc: u64) -> u64 {
 }
 
 fn rdtsc_ordered() -> u64 {
-    fence(Ordering::SeqCst);
-    unsafe { rdtsc() }
+    if has_rdtscp_cpu_feature() {
+        let (tsc, _aux) = unsafe { rdtscp() };
+        tsc
+    } else {
+        unsafe {
+            core::arch::asm!("lfence", options(nostack, nomem, preserves_flags));
+        }
+        unsafe { rdtsc() }
+    }
 }
 
 pub fn pvclock_clocksource_read_nowd(src: &PvclockVcpuTimeInfo) -> u64 {

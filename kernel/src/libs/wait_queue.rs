@@ -9,6 +9,7 @@ use core::{
     intrinsics::unlikely,
     marker::PhantomData,
     mem,
+    panic::Location,
     sync::atomic::{AtomicU32, AtomicU8, Ordering},
 };
 
@@ -218,6 +219,7 @@ impl WaitQueue {
     /// - Create only ONE waiter/waker pair
     /// - Enqueue the waker BEFORE each condition check
     /// - This ensures no wakeup is lost between check and sleep
+    #[track_caller]
     fn wait_until_impl<F, R, B>(
         &self,
         mut cond: F,
@@ -327,6 +329,17 @@ impl WaitQueue {
             } else {
                 None
             };
+
+            let preempt = ProcessManager::current_pcb().preempt_count();
+            if preempt > 0 {
+                let loc = Location::caller();
+                warn!(
+                    "sleep with preempt_count={} at {}:{}",
+                    preempt,
+                    loc.file(),
+                    loc.line()
+                );
+            }
 
             // Wait to be woken
             let wait_result = match (mode, is_io) {
@@ -674,15 +687,72 @@ impl Waiter {
         (waiter, waker)
     }
 
+    #[track_caller]
     pub fn wait(&self, interruptible: bool) -> Result<(), SystemError> {
+        let preempt = ProcessManager::current_pcb().preempt_count();
+        if preempt > 0 {
+            let loc = Location::caller();
+            warn!(
+                "sleep(wait) with preempt_count={} at {}:{}",
+                preempt,
+                loc.file(),
+                loc.line()
+            );
+            if let Some((site, pid)) = ProcessManager::last_preempt_disable_site() {
+                warn!(
+                    "last preempt_disable (1->2) at {}:{} (pid {})",
+                    site.file(),
+                    site.line(),
+                    pid
+                );
+            }
+        }
         block_current(self, interruptible)
     }
 
+    #[track_caller]
     pub fn wait_io(&self, interruptible: bool) -> Result<(), SystemError> {
+        let preempt = ProcessManager::current_pcb().preempt_count();
+        if preempt > 0 {
+            let loc = Location::caller();
+            warn!(
+                "sleep(wait_io) with preempt_count={} at {}:{}",
+                preempt,
+                loc.file(),
+                loc.line()
+            );
+            if let Some((site, pid)) = ProcessManager::last_preempt_disable_site() {
+                warn!(
+                    "last preempt_disable (1->2) at {}:{} (pid {})",
+                    site.file(),
+                    site.line(),
+                    pid
+                );
+            }
+        }
         block_current_io(self, interruptible)
     }
 
+    #[track_caller]
     pub fn wait_killable(&self) -> Result<(), SystemError> {
+        let preempt = ProcessManager::current_pcb().preempt_count();
+        if preempt > 0 {
+            let loc = Location::caller();
+            warn!(
+                "sleep(wait_killable) with preempt_count={} at {}:{}",
+                preempt,
+                loc.file(),
+                loc.line()
+            );
+            if let Some((site, pid)) = ProcessManager::last_preempt_disable_site() {
+                warn!(
+                    "last preempt_disable (1->2) at {}:{} (pid {})",
+                    site.file(),
+                    site.line(),
+                    pid
+                );
+            }
+        }
         block_current_killable(self)
     }
 

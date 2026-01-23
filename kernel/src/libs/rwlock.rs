@@ -4,6 +4,7 @@ use core::{
     hint::spin_loop,
     mem::{self, ManuallyDrop},
     ops::{Deref, DerefMut},
+    panic::Location,
     sync::atomic::{AtomicU32, Ordering},
 };
 
@@ -166,7 +167,17 @@ impl<T> RwLock<T> {
     #[allow(dead_code)]
     #[inline]
     /// @brief 获得READER的守卫
+    #[track_caller]
     pub fn read(&self) -> RwLockReadGuard<'_, T> {
+        if ProcessManager::initialized() {
+            let pcb = ProcessManager::current_pcb();
+            if pcb.preempt_count() == 1 {
+                ProcessManager::record_preempt_disable_site(
+                    Location::caller(),
+                    pcb.raw_pid().data(),
+                );
+            }
+        }
         loop {
             match self.try_read() {
                 Some(guard) => return guard,
@@ -176,7 +187,17 @@ impl<T> RwLock<T> {
     }
 
     /// 关中断并获取读者守卫
+    #[track_caller]
     pub fn read_irqsave(&self) -> RwLockReadGuard<'_, T> {
+        if ProcessManager::initialized() {
+            let pcb = ProcessManager::current_pcb();
+            if pcb.preempt_count() == 1 {
+                ProcessManager::record_preempt_disable_site(
+                    Location::caller(),
+                    pcb.raw_pid().data(),
+                );
+            }
+        }
         loop {
             let irq_guard = unsafe { CurrentIrqArch::save_and_disable_irq() };
             match self.try_read() {

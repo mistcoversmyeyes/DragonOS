@@ -4,6 +4,7 @@ use core::{
     hint::spin_loop,
     intrinsics::unlikely,
     mem::ManuallyDrop,
+    panic::Location,
     str::FromStr,
     sync::atomic::{compiler_fence, fence, AtomicBool, AtomicU8, AtomicUsize, Ordering},
 };
@@ -20,6 +21,10 @@ use log::{debug, error, info, warn};
 use pid::{alloc_pid, Pid, PidLink, PidType};
 use process_group::Pgid;
 use system_error::SystemError;
+
+// Debug aid: record the callsite when preempt_count goes 1 -> 2.
+pub(super) static LAST_PREEMPT_DISABLE_SITE: AtomicUsize = AtomicUsize::new(0);
+pub(super) static LAST_PREEMPT_DISABLE_PID: AtomicUsize = AtomicUsize::new(0);
 
 use crate::{
     arch::{
@@ -869,6 +874,16 @@ impl ProcessManager {
 
         ProcessManager::current_pcb().preempt_enable();
     }
+
+    /// 返回最近一次让 preempt_count 从 1->2 的调用点（用于定位“持锁睡眠”）。
+    pub fn last_preempt_disable_site() -> Option<(&'static Location<'static>, usize)> {
+        ProcessControlBlock::last_preempt_disable_site()
+    }
+
+    /// 记录 preempt_count 从 1->2 的调用点（调试用）。
+    pub fn record_preempt_disable_site(loc: &'static Location<'static>, pid: usize) {
+        ProcessControlBlock::record_preempt_disable_site(loc, pid)
+    }
 }
 
 /// 上下文切换的钩子函数,当这个函数return的时候,将会发生上下文切换
@@ -1464,6 +1479,23 @@ impl ProcessControlBlock {
     #[inline(always)]
     pub unsafe fn set_preempt_count(&self, count: usize) {
         self.preempt_count.store(count, Ordering::SeqCst);
+    }
+
+    /// 返回最近一次让 preempt_count 从 1->2 的调用点（用于定位“持锁睡眠”）。
+    pub fn last_preempt_disable_site() -> Option<(&'static Location<'static>, usize)> {
+        let site = LAST_PREEMPT_DISABLE_SITE.load(Ordering::Relaxed);
+        if site == 0 {
+            return None;
+        }
+        let pid = LAST_PREEMPT_DISABLE_PID.load(Ordering::Relaxed);
+        let loc = unsafe { &*(site as *const Location) };
+        Some((loc, pid))
+    }
+
+    /// 记录 preempt_count 从 1->2 的调用点（调试用）。
+    pub fn record_preempt_disable_site(loc: &'static Location<'static>, pid: usize) {
+        LAST_PREEMPT_DISABLE_SITE.store(loc as *const Location as usize, Ordering::Relaxed);
+        LAST_PREEMPT_DISABLE_PID.store(pid, Ordering::Relaxed);
     }
 
     #[inline(always)]
