@@ -183,8 +183,8 @@ if [ ${ARCH} == "i386" ] || [ ${ARCH} == "x86_64" ]; then
     # 仅在KVM加速时禁用HPET，以使用KVM clock作为时钟源
     # 非KVM加速（如TCG）时保留HPET，因为kvm-clock不可用
     if [ "${qemu_accel}" == "kvm" ]; then
-        # KVM加速：禁用HPET，使用kvm-clock（性能更好且延迟更低）
-        QEMU_MACHINE_ARGS=(-machine "q35,hpet=off")
+        # KVM加速：不强制禁用HPET，便于对比不同时间源行为
+        QEMU_MACHINE_ARGS=(-machine "q35")
     else
         # 非KVM加速
         QEMU_MACHINE_ARGS=(-machine q35)

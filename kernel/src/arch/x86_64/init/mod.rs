@@ -9,7 +9,7 @@ use x86::dtables::DescriptorTablePointer;
 
 use crate::{
     arch::{fpu::FpState, interrupt::trap::arch_trap_init, process::table::TSSManager},
-    driver::clocksource::{acpi_pm::init_acpi_pm_clocksource, kvm_clock},
+    driver::clocksource::acpi_pm::init_acpi_pm_clocksource,
     init::init::start_kernel,
     mm::{MemoryManagementArch, PhysAddr},
 };
@@ -109,7 +109,8 @@ pub fn setup_arch() -> Result<(), SystemError> {
 /// 架构相关的初始化（在IDLE的最后一个阶段）
 #[inline(never)]
 pub fn setup_arch_post() -> Result<(), SystemError> {
-    let kvmclock_ok = kvm_clock::kvmclock_init();
+    // 暂时禁用 kvm_clock 初始化，便于定位时间源相关问题
+    let kvmclock_ok = false;
 
     let ret = hpet_init();
     if ret.is_ok() {
