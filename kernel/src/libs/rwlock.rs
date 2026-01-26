@@ -171,12 +171,7 @@ impl<T> RwLock<T> {
     pub fn read(&self) -> RwLockReadGuard<'_, T> {
         if ProcessManager::initialized() {
             let pcb = ProcessManager::current_pcb();
-            if pcb.preempt_count() == 1 {
-                ProcessManager::record_preempt_disable_site(
-                    Location::caller(),
-                    pcb.raw_pid().data(),
-                );
-            }
+            ProcessManager::record_rwlock_read_site(Location::caller(), pcb.raw_pid().data());
         }
         loop {
             match self.try_read() {
@@ -191,12 +186,7 @@ impl<T> RwLock<T> {
     pub fn read_irqsave(&self) -> RwLockReadGuard<'_, T> {
         if ProcessManager::initialized() {
             let pcb = ProcessManager::current_pcb();
-            if pcb.preempt_count() == 1 {
-                ProcessManager::record_preempt_disable_site(
-                    Location::caller(),
-                    pcb.raw_pid().data(),
-                );
-            }
+            ProcessManager::record_rwlock_read_site(Location::caller(), pcb.raw_pid().data());
         }
         loop {
             let irq_guard = unsafe { CurrentIrqArch::save_and_disable_irq() };

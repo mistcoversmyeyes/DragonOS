@@ -25,6 +25,9 @@ use system_error::SystemError;
 // Debug aid: record the callsite when preempt_count goes 1 -> 2.
 pub(super) static LAST_PREEMPT_DISABLE_SITE: AtomicUsize = AtomicUsize::new(0);
 pub(super) static LAST_PREEMPT_DISABLE_PID: AtomicUsize = AtomicUsize::new(0);
+// Debug aid: record the callsite when a RwLock read path is entered.
+pub(super) static LAST_RWLOCK_READ_SITE: AtomicUsize = AtomicUsize::new(0);
+pub(super) static LAST_RWLOCK_READ_PID: AtomicUsize = AtomicUsize::new(0);
 
 use crate::{
     arch::{
@@ -884,6 +887,16 @@ impl ProcessManager {
     pub fn record_preempt_disable_site(loc: &'static Location<'static>, pid: usize) {
         ProcessControlBlock::record_preempt_disable_site(loc, pid)
     }
+
+    /// 记录最近一次 RwLock 读路径的调用点（调试用）。
+    pub fn record_rwlock_read_site(loc: &'static Location<'static>, pid: usize) {
+        ProcessControlBlock::record_rwlock_read_site(loc, pid)
+    }
+
+    /// 返回最近一次 RwLock 读路径的调用点（调试用）。
+    pub fn last_rwlock_read_site() -> Option<(&'static Location<'static>, usize)> {
+        ProcessControlBlock::last_rwlock_read_site()
+    }
 }
 
 /// 上下文切换的钩子函数,当这个函数return的时候,将会发生上下文切换
@@ -1496,6 +1509,23 @@ impl ProcessControlBlock {
     pub fn record_preempt_disable_site(loc: &'static Location<'static>, pid: usize) {
         LAST_PREEMPT_DISABLE_SITE.store(loc as *const Location as usize, Ordering::Relaxed);
         LAST_PREEMPT_DISABLE_PID.store(pid, Ordering::Relaxed);
+    }
+
+    /// 记录最近一次 RwLock 读路径的调用点（调试用）。
+    pub fn record_rwlock_read_site(loc: &'static Location<'static>, pid: usize) {
+        LAST_RWLOCK_READ_SITE.store(loc as *const Location as usize, Ordering::Relaxed);
+        LAST_RWLOCK_READ_PID.store(pid, Ordering::Relaxed);
+    }
+
+    /// 返回最近一次 RwLock 读路径的调用点（调试用）。
+    pub fn last_rwlock_read_site() -> Option<(&'static Location<'static>, usize)> {
+        let site = LAST_RWLOCK_READ_SITE.load(Ordering::Relaxed);
+        if site == 0 {
+            return None;
+        }
+        let pid = LAST_RWLOCK_READ_PID.load(Ordering::Relaxed);
+        let loc = unsafe { &*(site as *const Location) };
+        Some((loc, pid))
     }
 
     #[inline(always)]

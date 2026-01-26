@@ -706,6 +706,14 @@ impl Waiter {
                     pid
                 );
             }
+            if let Some((site, pid)) = ProcessManager::last_rwlock_read_site() {
+                warn!(
+                    "last rwlock read at {}:{} (pid {})",
+                    site.file(),
+                    site.line(),
+                    pid
+                );
+            }
         }
         block_current(self, interruptible)
     }
