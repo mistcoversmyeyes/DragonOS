@@ -271,18 +271,34 @@ participant "Timer" as T
 participant "TimerFunction" as TF
 
 IRQ -> TC : tick_handle_periodic()
+activate TC
 TC -> TMR : update_timer_jiffies(1)
+activate TMR
 TMR -> TK : update_wall_time()
+activate TK
+deactivate TK
+deactivate TMR
 TC -> TMR : run_local_timer()
+activate TMR
 TMR -> TMR : try_raise_timer_softirq()
 TMR -> SIRQ : raise_softirq(TIMER)
+activate SIRQ
 SIRQ -> DTS : run()
+activate DTS
 alt 有到期定时器
   DTS -> T : run()
+  activate T
   T -> TF : run()
+  activate TF
+  deactivate TF
+  deactivate T
 else 无到期定时器
   DTS -> DTS : return
 end
+deactivate DTS
+deactivate SIRQ
+deactivate TMR
+deactivate TC
 @enduml
 ```
 
@@ -300,17 +316,66 @@ participant "ClocksourceAPI\n<<utility>>" as CSA
 participant "watchdog_kthread" as WK
 
 CWD -> TMR : schedule watchdog timer
+activate TMR
 TMR -> T : Timer::new(WatchdogTimerFunc)
+activate T
 T -> WTF : run()
+activate WTF
 WTF -> CSW : clocksource_watchdog()
+activate CSW
 CSW -> CS : read + compare
+activate CS
 alt 偏差过大
   CSW -> CS : set_unstable()
   CSW -> WK : run_watchdog_kthread()
+  activate WK
   WK -> CSA : clocksource_select()
+  activate CSA
+  deactivate CSA
+  deactivate WK
 else 偏差正常
   CSW -> CWD : keep watchdog running
 end
+deactivate CS
+deactivate CSW
+deactivate WTF
+deactivate T
+deactivate TMR
+@enduml
+```
+
+### 时序图 4：Timekeeper 更新墙上时间（update_wall_time）
+
+```plantuml
+@startuml
+participant "TimerAPI\n<<utility>>" as TMR
+participant "TimekeepingAPI\n<<utility>>" as TK
+participant "Timekeeper" as TKP
+participant "Clocksource" as CS
+participant "timekeeping_adjust" as ADJ
+participant "timekeeping_update" as UPD
+participant "update_rt_offset" as RTO
+
+TMR -> TK : update_wall_time()
+activate TK
+TK -> TKP : 读取 TimekeeperData
+activate TKP
+TKP -> CS : read()
+activate CS
+deactivate CS
+TK -> TK : 计算 offset / xtime_nsec
+TK -> ADJ : timekeeping_adjust(offset)
+activate ADJ
+ADJ -> TKP : 更新 xtime/ntp 参数
+deactivate ADJ
+TK -> UPD : timekeeping_update()
+activate UPD
+UPD -> RTO : update_rt_offset()
+activate RTO
+deactivate RTO
+deactivate UPD
+deactivate TKP
+deactivate TK
 @enduml
 ```
 

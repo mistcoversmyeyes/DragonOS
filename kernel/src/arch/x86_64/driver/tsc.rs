@@ -12,6 +12,7 @@ use log::{debug, error, info, warn};
 use system_error::SystemError;
 
 use super::hpet::{hpet_instance, is_hpet_enabled};
+use crate::driver::clocksource::tsc::init_tsc_clocksource;
 
 #[derive(Debug)]
 pub struct TSCManager;
@@ -28,6 +29,7 @@ impl TSCManager {
     ///
     /// 参考 https://code.dragonos.org.cn/xref/linux-6.1.9/arch/x86/kernel/tsc.c#1511
     pub fn init() -> Result<(), SystemError> {
+        info!("Initializing TSC...");
         let cpuid = x86::cpuid::CpuId::new();
         let feat = cpuid.get_feature_info().ok_or(SystemError::ENODEV)?;
         if !feat.has_tsc() {
@@ -47,7 +49,10 @@ impl TSCManager {
             }
         }
 
-        // todo: register TSC as clock source and deal with unstable clock source
+        init_tsc_clocksource().map_err(|e| {
+            error!("Failed to register TSC clocksource: {:?}", e);
+            e
+        })?;
 
         return Ok(());
     }
