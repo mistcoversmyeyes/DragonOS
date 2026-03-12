@@ -388,7 +388,7 @@ pub struct KernelShm {
     shm_start_paddr: PhysAddr,
     /// 共享内存段大小(bytes)，注意是用户指定的大小（未经过页面对齐）
     shm_size: usize,
-    /// 映射计数
+    /// 逻辑 attachment 计数（例如显式 shmat 和 fork 继承），而不是 VMA 分段数
     map_count: usize,
     /// 最后一次 attach 的时间
     shm_atim: PosixTimeSpec,
@@ -450,7 +450,7 @@ impl KernelShm {
         self.shm_ctim = PosixTimeSpec::now();
     }
 
-    /// 共享内存段的映射计数（有多少个不同的VMA映射）
+    /// 共享内存段的逻辑 attachment 计数
     pub fn map_count(&self) -> usize {
         self.map_count
     }

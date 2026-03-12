@@ -1,9 +1,12 @@
 use crate::arch::interrupt::TrapFrame;
-use crate::mm::mmu_gather::MmuGather;
 use crate::syscall::table::FormattedSyscallParam;
 use crate::{
     arch::syscall::nr::SYS_SHMDT,
-    mm::{ucontext::AddressSpace, VirtAddr},
+    mm::{
+        allocator::page_frame::{PageFrameCount, VirtPageFrame},
+        ucontext::AddressSpace,
+        VirtAddr,
+    },
     syscall::table::Syscall,
 };
 use alloc::vec::Vec;
@@ -55,12 +58,11 @@ impl Syscall for SysShmdtHandle {
             return Err(SystemError::EINVAL);
         }
 
-        // Unmap via MmuGather: shootdown first, then free physical pages (INV-3).
-        {
-            let mut tlb = MmuGather::gather(&current_address_space);
-            vma.unmap(&mut address_write_guard.user_mapper.utable, &mut tlb);
-            tlb.finish();
-        }
+        let region = *vma.lock().region();
+        address_write_guard.munmap(
+            VirtPageFrame::new(region.start()),
+            PageFrameCount::from_bytes(region.size()).ok_or(SystemError::EINVAL)?,
+        )?;
 
         return Ok(0);
     }
