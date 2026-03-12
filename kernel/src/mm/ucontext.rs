@@ -4,8 +4,9 @@ use core::{
     cmp,
     hash::Hasher,
     intrinsics::unlikely,
+    mem,
     ops::Add,
-    sync::atomic::{compiler_fence, AtomicU64, Ordering},
+    sync::atomic::{compiler_fence, AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 
 use alloc::{
@@ -42,9 +43,10 @@ use super::{
     allocator::page_frame::{
         deallocate_page_frames, PageFrameCount, PhysPageFrame, VirtPageFrame, VirtPageFrameIter,
     },
+    fault::{PageFaultHandler, PageFaultMessage},
     page::{EntryFlags, Flusher, InactiveFlusher, Page, PageFlags, PageFlushAll, PageType},
     syscall::{MadvFlags, MapFlags, MremapFlags, ProtFlags},
-    MemoryManagementArch, PageTableKind, VirtAddr, VirtRegion, VmFlags,
+    MemoryManagementArch, PageTableKind, VirtAddr, VirtRegion, VmFaultReason, VmFlags,
 };
 use crate::arch::mm::LockedFrameAllocator;
 
@@ -254,36 +256,30 @@ impl InnerAddressSpace {
             let is_shared = vm_flags.contains(VmFlags::VM_SHARED);
             let region = *vma_guard.region();
             let page_flags = vma_guard.flags();
-            let shm_id = vma_guard.shm_id;
-
-            // 创建新的VMA
-            let new_vma = LockedVMA::new(vma_guard.clone_info_only());
-            new_guard.mappings.vmas.insert(new_vma.clone());
-            drop(vma_guard);
-
+            let shm_id = vma_guard.shm_id();
             let mut skip_mapping = false;
+
             if let Some(shm_id) = shm_id {
                 let ipcns = ProcessManager::current_ipcns();
                 let mut shm_manager_guard = ipcns.shm.lock();
-                match shm_manager_guard.get_mut(&shm_id) {
-                    Some(kernel_shm) => {
-                        // Forked SHM mappings count as new attachments.
-                        kernel_shm.increase_count();
-                    }
-                    None => {
-                        warn!(
-                            "Fork: SHM segment {:?} no longer exists, skipping VMA clone",
-                            shm_id
-                        );
-                        skip_mapping = true;
-                    }
+                if shm_manager_guard.get_mut(&shm_id).is_none() {
+                    warn!(
+                        "Fork: SHM segment {:?} no longer exists, skipping VMA clone",
+                        shm_id
+                    );
+                    skip_mapping = true;
                 }
             }
 
             if skip_mapping {
-                let _ = new_guard.mappings.remove_vma(&region);
+                drop(vma_guard);
                 continue;
             }
+
+            // 创建新的VMA
+            let new_vma = LockedVMA::new(vma_guard.fork_clone_info());
+            new_guard.mappings.vmas.insert(new_vma.clone());
+            drop(vma_guard);
 
             // 根据VMA类型进行不同的页面复制策略
             let start_page = region.start();
@@ -453,32 +449,21 @@ impl InnerAddressSpace {
             prot_flags,
             map_flags,
             move |page, count, vm_flags, flags, mapper, flusher| {
-                if allocate_at_once {
-                    let vma =
-                        VMA::zeroed(page, count, vm_flags, flags, mapper, flusher, None, None)?;
-                    // 如果是共享匿名映射，则分配稳定身份
-                    if vm_flags.contains(VmFlags::VM_SHARED) {
-                        let mut g = vma.lock();
-                        g.shared_anon = Some(AnonSharedMapping::new(count.data()));
-                        // Set backing_pgoff to 0 as the base offset for shared-anon mappings.
-                        g.backing_pgoff = Some(0);
-                    }
-                    Ok(vma)
+                let ops = if vm_flags.contains(VmFlags::VM_SHARED) {
+                    VmaOps::shared_anonymous(AnonSharedMapping::new(count.data()), 0)
                 } else {
-                    let vma = LockedVMA::new(VMA::new(
+                    VmaOps::anonymous()
+                };
+                if allocate_at_once {
+                    VMA::zeroed(page, count, vm_flags, flags, mapper, flusher, ops)
+                } else {
+                    Ok(LockedVMA::new(VMA::new(
                         VirtRegion::new(page.virt_address(), count.data() * MMArch::PAGE_SIZE),
                         vm_flags,
                         flags,
-                        None,
-                        None,
+                        ops,
                         false,
-                    ));
-                    if vm_flags.contains(VmFlags::VM_SHARED) {
-                        let mut g = vma.lock();
-                        g.shared_anon = Some(AnonSharedMapping::new(count.data()));
-                        g.backing_pgoff = Some(0);
-                    }
-                    Ok(vma)
+                    )))
                 }
             },
         )?;
@@ -579,24 +564,15 @@ impl InnerAddressSpace {
             prot_flags,
             map_flags,
             |page, count, vm_flags, flags, mapper, flusher| {
+                let ops = VmaOps::file(file.clone(), pgoff);
                 if allocate_at_once {
-                    VMA::zeroed(
-                        page,
-                        count,
-                        vm_flags,
-                        flags,
-                        mapper,
-                        flusher,
-                        Some(file.clone()),
-                        Some(pgoff),
-                    )
+                    VMA::zeroed(page, count, vm_flags, flags, mapper, flusher, ops)
                 } else {
                     Ok(LockedVMA::new(VMA::new(
                         VirtRegion::new(page.virt_address(), count.data() * MMArch::PAGE_SIZE),
                         vm_flags,
                         flags,
-                        Some(file.clone()),
-                        Some(pgoff),
+                        ops,
                         false,
                     )))
                 }
@@ -807,7 +783,7 @@ impl InnerAddressSpace {
             .mappings
             .contains(old_vaddr)
             .ok_or(SystemError::EINVAL)?;
-        let (old_region, vm_file, shared_anon, base_pgoff) = {
+        let (old_region, vm_file, shared_anon, base_pgoff, template_vma) = {
             let g = old_vma.lock();
             let region = *g.region();
             let vma_start = region.start();
@@ -817,7 +793,11 @@ impl InnerAddressSpace {
                 .backing_page_offset()
                 .unwrap_or(0)
                 .saturating_add(off_pages);
-            (region, g.vm_file(), g.shared_anon.clone(), base)
+            let mut template_vma = g.clone_info_only();
+            if g.vm_file().is_some() || g.shared_anon().is_some() {
+                template_vma.set_backing_page_offset(Some(base));
+            }
+            (region, g.vm_file(), g.shared_anon(), base, template_vma)
         };
 
         // 构造目标映射 flags：mremap 需要保留 shared/private 语义，并区分 anon/file。
@@ -897,23 +877,14 @@ impl InnerAddressSpace {
 
         // 创建目标 VMA（初始不映射物理页；存在的页表项会在下面被移动/复制）。
         let new_vma: Arc<LockedVMA> = {
-            let vma = LockedVMA::new(VMA::new(
-                new_region,
-                vm_flags,
-                entry_flags,
-                vm_file.clone(),
-                if vm_file.is_some() || shared_anon.is_some() {
-                    Some(base_pgoff)
-                } else {
-                    None
-                },
-                false,
-            ));
-            if let Some(shared) = shared_anon.clone() {
-                let mut vg = vma.lock();
-                vg.shared_anon = Some(shared);
-                vg.backing_pgoff = Some(base_pgoff);
+            let mut vma = template_vma;
+            vma.region = new_region;
+            vma.flags = entry_flags;
+            vma.mapped = false;
+            if vm_file.is_some() || shared_anon.is_some() {
+                vma.set_backing_page_offset(Some(base_pgoff));
             }
+            let vma = LockedVMA::new(vma);
             self.mappings.insert_vma(vma.clone());
             vma
         };
@@ -1045,6 +1016,7 @@ impl InnerAddressSpace {
             }
 
             cur_vma.unmap(&mut self.user_mapper.utable, &mut flusher);
+            cur_vma.close_once();
         }
 
         // TODO: 当引入后备页映射后，这里需要增加通知文件的逻辑
@@ -1613,6 +1585,269 @@ impl Default for UserMappings {
     }
 }
 
+pub trait VmaOperations {
+    fn open(&self, _vma: &LockedVMA) {}
+
+    fn close(&self, _vma: &LockedVMA) {}
+
+    unsafe fn fault(&self, _vma: &LockedVMA, pfm: &mut PageFaultMessage<'_>) -> VmFaultReason;
+}
+
+#[derive(Debug)]
+struct SysvShmAttachment {
+    shm_id: ShmId,
+    segment_refs: AtomicUsize,
+}
+
+impl SysvShmAttachment {
+    fn new_with_attach(shm_id: ShmId) -> Arc<Self> {
+        let attachment = Arc::new(Self {
+            shm_id,
+            segment_refs: AtomicUsize::new(0),
+        });
+        attachment.account_attach(true);
+        attachment
+    }
+
+    fn new_from_fork(shm_id: ShmId) -> Arc<Self> {
+        let attachment = Arc::new(Self {
+            shm_id,
+            segment_refs: AtomicUsize::new(0),
+        });
+        attachment.account_attach(false);
+        attachment
+    }
+
+    fn shm_id(&self) -> ShmId {
+        self.shm_id
+    }
+
+    fn account_attach(&self, update_atime: bool) {
+        let ipcns = ProcessManager::current_ipcns();
+        let mut shm_manager_guard = ipcns.shm.lock();
+        if let Some(kernel_shm) = shm_manager_guard.get_mut(&self.shm_id) {
+            if update_atime {
+                kernel_shm.update_atim();
+            }
+            kernel_shm.increase_count();
+        } else {
+            warn!(
+                "SysV SHM attachment {:?} no longer exists while attaching",
+                self.shm_id
+            );
+        }
+    }
+
+    fn on_open_segment(&self) {
+        self.segment_refs.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn on_close_segment(&self) {
+        let prev = self.segment_refs.fetch_sub(1, Ordering::AcqRel);
+        assert!(prev > 0, "SysV SHM segment_refs is zero");
+        if prev != 1 {
+            return;
+        }
+
+        let ipcns = ProcessManager::current_ipcns();
+        let mut shm_manager_guard = ipcns.shm.lock();
+        if let Some(kernel_shm) = shm_manager_guard.get_mut(&self.shm_id) {
+            kernel_shm.update_dtim();
+            kernel_shm.decrease_count();
+
+            if kernel_shm.map_count() == 0 && kernel_shm.mode().contains(ShmFlags::SHM_DEST) {
+                shm_manager_guard.free_id(&self.shm_id);
+            }
+        } else {
+            warn!(
+                "SysV SHM attachment {:?} no longer exists while detaching",
+                self.shm_id
+            );
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AnonymousVmaOps {
+    backing_pgoff: Option<usize>,
+    shared_anon: Option<Arc<AnonSharedMapping>>,
+}
+
+impl AnonymousVmaOps {
+    pub fn private() -> Self {
+        Self {
+            backing_pgoff: None,
+            shared_anon: None,
+        }
+    }
+
+    pub fn shared(shared_anon: Arc<AnonSharedMapping>, backing_pgoff: usize) -> Self {
+        Self {
+            backing_pgoff: Some(backing_pgoff),
+            shared_anon: Some(shared_anon),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct FileVmaOps {
+    file: Arc<File>,
+    backing_pgoff: usize,
+}
+
+impl FileVmaOps {
+    pub fn new(file: Arc<File>, backing_pgoff: usize) -> Self {
+        Self {
+            file,
+            backing_pgoff,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PhysicalVmaOps {
+    attachment: Option<Arc<SysvShmAttachment>>,
+}
+
+impl PhysicalVmaOps {
+    pub fn new(shm_id: Option<ShmId>) -> Self {
+        Self {
+            attachment: shm_id.map(SysvShmAttachment::new_with_attach),
+        }
+    }
+
+    pub fn plain() -> Self {
+        Self { attachment: None }
+    }
+
+    pub fn fork_clone(&self) -> Self {
+        Self {
+            attachment: self
+                .attachment
+                .as_ref()
+                .map(|attachment| SysvShmAttachment::new_from_fork(attachment.shm_id())),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum VmaOps {
+    Anonymous(AnonymousVmaOps),
+    File(FileVmaOps),
+    Physical(PhysicalVmaOps),
+}
+
+impl VmaOps {
+    pub fn anonymous() -> Self {
+        Self::Anonymous(AnonymousVmaOps::private())
+    }
+
+    pub fn shared_anonymous(shared_anon: Arc<AnonSharedMapping>, backing_pgoff: usize) -> Self {
+        Self::Anonymous(AnonymousVmaOps::shared(shared_anon, backing_pgoff))
+    }
+
+    pub fn file(file: Arc<File>, backing_pgoff: usize) -> Self {
+        Self::File(FileVmaOps::new(file, backing_pgoff))
+    }
+
+    pub fn physical(shm_id: Option<ShmId>) -> Self {
+        match shm_id {
+            Some(shm_id) => Self::Physical(PhysicalVmaOps::new(Some(shm_id))),
+            None => Self::Physical(PhysicalVmaOps::plain()),
+        }
+    }
+
+    pub fn fork_clone(&self) -> Self {
+        match self {
+            Self::Physical(inner) => Self::Physical(inner.fork_clone()),
+            _ => self.clone(),
+        }
+    }
+
+    pub fn vm_file(&self) -> Option<Arc<File>> {
+        match self {
+            Self::File(inner) => Some(inner.file.clone()),
+            _ => None,
+        }
+    }
+
+    pub fn shared_anon(&self) -> Option<Arc<AnonSharedMapping>> {
+        match self {
+            Self::Anonymous(inner) => inner.shared_anon.clone(),
+            _ => None,
+        }
+    }
+
+    pub fn shm_id(&self) -> Option<ShmId> {
+        match self {
+            Self::Physical(inner) => inner
+                .attachment
+                .as_ref()
+                .map(|attachment| attachment.shm_id()),
+            _ => None,
+        }
+    }
+
+    pub fn backing_page_offset(&self) -> Option<usize> {
+        match self {
+            Self::Anonymous(inner) => inner.backing_pgoff,
+            Self::File(inner) => Some(inner.backing_pgoff),
+            Self::Physical(_) => None,
+        }
+    }
+
+    pub fn set_backing_page_offset(&mut self, backing_pgoff: Option<usize>) {
+        match self {
+            Self::Anonymous(inner) => inner.backing_pgoff = backing_pgoff,
+            Self::File(inner) => {
+                if let Some(backing_pgoff) = backing_pgoff {
+                    inner.backing_pgoff = backing_pgoff;
+                }
+            }
+            Self::Physical(_) => {}
+        }
+    }
+
+    pub fn set_shm_id(&mut self, shm_id: Option<ShmId>) {
+        match self {
+            Self::Physical(inner) => {
+                inner.attachment = shm_id.map(SysvShmAttachment::new_with_attach);
+            }
+            _ => *self = Self::physical(shm_id),
+        }
+    }
+
+    pub fn is_anonymous(&self) -> bool {
+        !matches!(self, Self::File(_))
+    }
+}
+
+impl VmaOperations for VmaOps {
+    fn open(&self, _vma: &LockedVMA) {
+        if let Self::Physical(inner) = self {
+            if let Some(attachment) = inner.attachment.as_ref() {
+                attachment.on_open_segment();
+            }
+        }
+    }
+
+    fn close(&self, _vma: &LockedVMA) {
+        if let Self::Physical(inner) = self {
+            if let Some(attachment) = inner.attachment.as_ref() {
+                attachment.on_close_segment();
+            }
+        }
+    }
+
+    unsafe fn fault(&self, _vma: &LockedVMA, pfm: &mut PageFaultMessage<'_>) -> VmFaultReason {
+        match self {
+            Self::Anonymous(_) => PageFaultHandler::do_anonymous_page(pfm),
+            Self::File(_) => PageFaultHandler::do_fault(pfm),
+            Self::Physical(_) => VmFaultReason::VM_FAULT_SIGBUS,
+        }
+    }
+}
+
 /// 加了锁的VMA
 ///
 /// 备注：进行性能测试，看看SpinLock和RwLock哪个更快。
@@ -1620,6 +1855,7 @@ impl Default for UserMappings {
 pub struct LockedVMA {
     /// 用于计算哈希值，避免总是获取vma锁来计算哈希值
     id: usize,
+    closed: AtomicBool,
     vma: Mutex<VMA>,
 }
 
@@ -1642,9 +1878,12 @@ impl LockedVMA {
     pub fn new(vma: VMA) -> Arc<Self> {
         let r = Arc::new(Self {
             id: LOCKEDVMA_ID_ALLOCATOR.lock().alloc().unwrap(),
+            closed: AtomicBool::new(false),
             vma: Mutex::new(vma),
         });
         r.vma.lock().self_ref = Arc::downgrade(&r);
+        let ops = { r.vma.lock().ops.clone() };
+        ops.open(&r);
         return r;
     }
 
@@ -1654,6 +1893,33 @@ impl LockedVMA {
 
     pub fn lock(&self) -> MutexGuard<'_, VMA> {
         return self.vma.lock();
+    }
+
+    pub fn close_once(&self) {
+        if !self.closed.swap(true, Ordering::AcqRel) {
+            let ops = { self.vma.lock().ops.clone() };
+            ops.close(self);
+        }
+    }
+
+    pub unsafe fn fault(&self, pfm: &mut PageFaultMessage<'_>) -> VmFaultReason {
+        let ops = { self.vma.lock().ops.clone() };
+        ops.fault(self, pfm)
+    }
+
+    pub fn replace_ops(&self, new_ops: VmaOps, close_old: bool) {
+        let old_ops = {
+            let mut guard = self.lock();
+            self.closed.store(false, Ordering::Release);
+            mem::replace(&mut guard.ops, new_ops)
+        };
+
+        if close_old {
+            old_ops.close(self);
+        }
+
+        let ops = { self.vma.lock().ops.clone() };
+        ops.open(self);
     }
 
     /// 调整当前VMA的页面的标志位
@@ -1694,26 +1960,9 @@ impl LockedVMA {
 
         // 获取映射的物理地址
         if let Some((paddr, _flags)) = mapper.translate(self_guard.region().start()) {
-            // 如果是共享页，执行释放操作
+            // 如果是共享页，保留这里的读取以维持与现有页生命周期检查一致
             let page = page_manager_guard.get(&paddr).unwrap();
             let _page_guard = page.read();
-            if let Some(shm_id) = self_guard.shm_id {
-                let ipcns = ProcessManager::current_ipcns();
-                let mut shm_manager_guard = ipcns.shm.lock();
-                if let Some(kernel_shm) = shm_manager_guard.get_mut(&shm_id) {
-                    // 更新最后一次断开连接时间
-                    kernel_shm.update_dtim();
-
-                    // 映射计数减少
-                    kernel_shm.decrease_count();
-
-                    // 释放shm_id
-                    if kernel_shm.map_count() == 0 && kernel_shm.mode().contains(ShmFlags::SHM_DEST)
-                    {
-                        shm_manager_guard.free_id(&shm_id);
-                    }
-                }
-            }
         }
 
         for page in self_guard.region.pages() {
@@ -1819,7 +2068,7 @@ impl LockedVMA {
         }
 
         let before: Option<Arc<LockedVMA>> = guard.region.before(&region).map(|virt_region| {
-            let mut vma: VMA = unsafe { guard.clone() };
+            let mut vma = guard.clone_info_only();
             vma.region = virt_region;
             vma.mapped = false;
             // backing_pgoff 保持不变，before VMA 使用原始的offset
@@ -1828,15 +2077,15 @@ impl LockedVMA {
         });
 
         let after: Option<Arc<LockedVMA>> = guard.region.after(&region).map(|virt_region| {
-            let mut vma: VMA = unsafe { guard.clone() };
+            let mut vma = guard.clone_info_only();
             vma.region = virt_region;
             vma.mapped = false;
             // after VMA 需要调整backing_pgoff
             // after 区域的起始地址相对于原始VMA起始地址的偏移（以页为单位）
-            if let Some(original_pgoff) = vma.backing_pgoff {
+            if let Some(original_pgoff) = vma.backing_page_offset() {
                 let offset_pages =
                     (virt_region.start() - guard.region.start()) >> MMArch::PAGE_SHIFT;
-                vma.backing_pgoff = Some(original_pgoff + offset_pages);
+                vma.set_backing_page_offset(Some(original_pgoff + offset_pages));
             }
             let vma: Arc<LockedVMA> = LockedVMA::new(vma);
             vma
@@ -1872,9 +2121,9 @@ impl LockedVMA {
         // 调整 middleVMA 的 region 和 backing_pgoff
         let original_start = guard.region.start();
         guard.region = region;
-        if let Some(original_pgoff) = guard.backing_pgoff {
+        if let Some(original_pgoff) = guard.backing_page_offset() {
             let offset_pages = (region.start() - original_start) >> MMArch::PAGE_SHIFT;
-            guard.backing_pgoff = Some(original_pgoff + offset_pages);
+            guard.set_backing_page_offset(Some(original_pgoff + offset_pages));
         }
 
         return Some(VMASplitResult::new(
@@ -1908,7 +2157,7 @@ impl LockedVMA {
     /// 判断VMA是否为匿名映射
     pub fn is_anonymous(&self) -> bool {
         let guard = self.lock();
-        guard.vm_file.is_none()
+        guard.is_anonymous()
     }
 
     /// 判断VMA是否为大页映射
@@ -1920,6 +2169,10 @@ impl LockedVMA {
 
 impl Drop for LockedVMA {
     fn drop(&mut self) {
+        if !self.closed.load(Ordering::Relaxed) {
+            let ops = { self.vma.lock().ops.clone() };
+            ops.close(self);
+        }
         LOCKEDVMA_ID_ALLOCATOR.lock().free(self.id);
     }
 }
@@ -1971,16 +2224,8 @@ pub struct VMA {
     /// VMA所属的用户地址空间
     user_address_space: Option<Weak<AddressSpace>>,
     self_ref: Weak<LockedVMA>,
-
-    vm_file: Option<Arc<File>>,
-    /// VMA映射的后备对象(文件/共享匿名)相对于整个后备对象的偏移页数
-    backing_pgoff: Option<usize>,
-
-    provider: Provider,
-    /// 关联的 SysV SHM 标识（当此 VMA 来自 shmat 时设置）
-    shm_id: Option<ShmId>,
-    /// 共享匿名映射的稳定身份（用于跨进程共享 futex key）
-    pub(crate) shared_anon: Option<Arc<AnonSharedMapping>>,
+    /// VMA 后备对象的行为与状态
+    ops: VmaOps,
 }
 
 impl core::hash::Hash for VMA {
@@ -1989,12 +2234,6 @@ impl core::hash::Hash for VMA {
         self.flags.hash(state);
         self.mapped.hash(state);
     }
-}
-
-/// 描述不同类型的内存提供者或资源
-#[derive(Debug)]
-pub enum Provider {
-    Allocated, // TODO:其他
 }
 
 /// 共享匿名映射的稳定身份
@@ -2076,8 +2315,7 @@ impl VMA {
         region: VirtRegion,
         vm_flags: VmFlags,
         flags: EntryFlags<MMArch>,
-        file: Option<Arc<File>>,
-        pgoff: Option<usize>,
+        ops: VmaOps,
         mapped: bool,
     ) -> Self {
         VMA {
@@ -2087,11 +2325,7 @@ impl VMA {
             mapped,
             user_address_space: None,
             self_ref: Weak::default(),
-            provider: Provider::Allocated,
-            vm_file: file,
-            backing_pgoff: pgoff,
-            shm_id: None,
-            shared_anon: None,
+            ops,
         }
     }
 
@@ -2104,11 +2338,19 @@ impl VMA {
     }
 
     pub fn vm_file(&self) -> Option<Arc<File>> {
-        return self.vm_file.clone();
+        return self.ops.vm_file();
     }
 
     pub fn address_space(&self) -> Option<Weak<AddressSpace>> {
         return self.user_address_space.clone();
+    }
+
+    pub fn shared_anon(&self) -> Option<Arc<AnonSharedMapping>> {
+        return self.ops.shared_anon();
+    }
+
+    pub fn shm_id(&self) -> Option<ShmId> {
+        return self.ops.shm_id();
     }
 
     pub fn set_vm_flags(&mut self, vm_flags: VmFlags) {
@@ -2129,28 +2371,7 @@ impl VMA {
 
     #[inline(always)]
     pub fn set_shm_id(&mut self, shm: Option<ShmId>) {
-        self.shm_id = shm;
-    }
-
-    /// # 拷贝当前VMA的内容
-    ///
-    /// ### 安全性
-    ///
-    /// 由于这样操作可能由于错误的拷贝，导致内存泄露、内存重复释放等问题，所以需要小心使用。
-    pub unsafe fn clone(&self) -> Self {
-        return Self {
-            region: self.region,
-            vm_flags: self.vm_flags,
-            flags: self.flags,
-            mapped: self.mapped,
-            user_address_space: self.user_address_space.clone(),
-            self_ref: self.self_ref.clone(),
-            provider: Provider::Allocated,
-            backing_pgoff: self.backing_pgoff,
-            vm_file: self.vm_file.clone(),
-            shm_id: self.shm_id,
-            shared_anon: self.shared_anon.clone(),
-        };
+        self.ops.set_shm_id(shm);
     }
 
     pub fn clone_info_only(&self) -> Self {
@@ -2161,12 +2382,20 @@ impl VMA {
             mapped: self.mapped,
             user_address_space: None,
             self_ref: Weak::default(),
-            provider: Provider::Allocated,
-            backing_pgoff: self.backing_pgoff,
-            vm_file: self.vm_file.clone(),
-            shm_id: self.shm_id,
-            shared_anon: self.shared_anon.clone(),
+            ops: self.ops.clone(),
         };
+    }
+
+    pub fn fork_clone_info(&self) -> Self {
+        Self {
+            region: self.region,
+            vm_flags: self.vm_flags,
+            flags: self.flags,
+            mapped: self.mapped,
+            user_address_space: None,
+            self_ref: Weak::default(),
+            ops: self.ops.fork_clone(),
+        }
     }
 
     #[inline(always)]
@@ -2176,7 +2405,17 @@ impl VMA {
 
     #[inline(always)]
     pub fn backing_page_offset(&self) -> Option<usize> {
-        return self.backing_pgoff;
+        return self.ops.backing_page_offset();
+    }
+
+    #[inline(always)]
+    pub fn set_backing_page_offset(&mut self, backing_pgoff: Option<usize>) {
+        self.ops.set_backing_page_offset(backing_pgoff);
+    }
+
+    #[inline(always)]
+    pub fn is_anonymous(&self) -> bool {
+        self.ops.is_anonymous()
     }
 
     pub fn pages(&self) -> VirtPageFrameIter {
@@ -2215,16 +2454,8 @@ impl VMA {
     ///
     /// - `prot_flags` 要检查的标志位
     pub fn can_have_flags(&self, prot_flags: ProtFlags) -> bool {
-        let is_downgrade = (self.flags.has_write() || !prot_flags.contains(ProtFlags::PROT_WRITE))
-            && (self.flags.has_execute() || !prot_flags.contains(ProtFlags::PROT_EXEC));
-
-        #[allow(clippy::unneeded_struct_pattern)]
-        match self.provider {
-            Provider::Allocated { .. } => true,
-
-            #[allow(unreachable_patterns)]
-            _ => is_downgrade,
-        }
+        let _ = prot_flags;
+        true
     }
 
     /// 把物理地址映射到虚拟地址
@@ -2269,13 +2500,9 @@ impl VMA {
             ),
             params.vm_flags,
             params.flags,
-            None,
-            None,
+            VmaOps::physical(params.shm_id),
             true,
         ));
-        if let Some(id) = params.shm_id {
-            r.lock().set_shm_id(Some(id));
-        }
 
         // 将VMA加入到anon_vma中
         let mut page_manager_guard = page_manager_lock();
@@ -2312,8 +2539,7 @@ impl VMA {
         flags: EntryFlags<MMArch>,
         mapper: &mut PageMapper,
         mut flusher: impl Flusher<MMArch>,
-        file: Option<Arc<File>>,
-        pgoff: Option<usize>,
+        ops: VmaOps,
     ) -> Result<Arc<LockedVMA>, SystemError> {
         let mut cur_dest: VirtPageFrame = destination;
         // debug!(
@@ -2340,8 +2566,7 @@ impl VMA {
             ),
             vm_flags,
             flags,
-            file,
-            pgoff,
+            ops,
             true,
         ));
         drop(flusher);
@@ -2363,9 +2588,9 @@ impl VMA {
     }
 
     pub fn page_address(&self, index: usize) -> Result<VirtAddr, SystemError> {
-        if index >= self.backing_pgoff.unwrap() {
-            let address =
-                self.region.start + ((index - self.backing_pgoff.unwrap()) << MMArch::PAGE_SHIFT);
+        if index >= self.backing_page_offset().unwrap() {
+            let address = self.region.start
+                + ((index - self.backing_page_offset().unwrap()) << MMArch::PAGE_SHIFT);
             if address <= self.region.end() {
                 return Ok(address);
             }

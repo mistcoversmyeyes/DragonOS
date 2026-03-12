@@ -1,10 +1,12 @@
 use crate::arch::interrupt::TrapFrame;
-use crate::mm::page::PageFlushAll;
 use crate::syscall::table::FormattedSyscallParam;
 use crate::{
     arch::syscall::nr::SYS_SHMDT,
-    arch::MMArch,
-    mm::{ucontext::AddressSpace, VirtAddr},
+    mm::{
+        allocator::page_frame::{PageFrameCount, VirtPageFrame},
+        ucontext::AddressSpace,
+        VirtAddr,
+    },
     syscall::table::Syscall,
 };
 use alloc::vec::Vec;
@@ -56,9 +58,11 @@ impl Syscall for SysShmdtHandle {
             return Err(SystemError::EINVAL);
         }
 
-        // 取消映射
-        let flusher: PageFlushAll<MMArch> = PageFlushAll::new();
-        vma.unmap(&mut address_write_guard.user_mapper.utable, flusher);
+        let region = *vma.lock().region();
+        address_write_guard.munmap(
+            VirtPageFrame::new(region.start()),
+            PageFrameCount::from_bytes(region.size()).ok_or(SystemError::EINVAL)?,
+        )?;
 
         return Ok(0);
     }

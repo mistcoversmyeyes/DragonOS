@@ -216,10 +216,8 @@ impl PageFaultHandler {
                     entry.set_flags(EntryFlags::from_data(MMArch::ENTRY_FLAG_DIRTY));
                 }
             }
-        } else if vma.is_anonymous() {
-            ret = Self::do_anonymous_page(pfm);
         } else {
-            ret = Self::do_fault(pfm);
+            ret = vma.fault(pfm);
         }
 
         vma.lock().set_mapped(true);
@@ -244,7 +242,7 @@ impl PageFaultHandler {
         {
             let guard = vma.lock();
             if guard.vm_flags().contains(VmFlags::VM_SHARED) {
-                let shared = guard.shared_anon.clone();
+                let shared = guard.shared_anon();
                 if let Some(shared) = shared {
                     // Compute page index within the shared-anon backing object.
                     // Base offset is stored in VMA.backing_pgoff.
