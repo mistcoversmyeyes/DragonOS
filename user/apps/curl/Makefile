@@ -7,6 +7,10 @@ curl_dir := $(build_dir)/curl-$(curl_version)
 host := $(ARCH)-linux-musl
 prefix := $(host)-
 bin := $(build_dir)/curl
+mbedtls_root := $(abspath $(build_dir)/mbedtls-root)
+mbedtls_prefix := $(mbedtls_root)/usr
+ca_bundle_src := /etc/ssl/certs/ca-certificates.crt
+ca_bundle_dst := etc/ssl/certs/ca-certificates.crt
 
 cc := $(prefix)gcc
 strip := $(prefix)strip
@@ -35,10 +39,9 @@ configure_args := \
 	--disable-telnet \
 	--disable-tftp \
 	--disable-websockets \
-	--without-ssl \
 	--without-openssl \
 	--without-gnutls \
-	--without-mbedtls \
+	--with-mbedtls=$(mbedtls_prefix) \
 	--without-rustls \
 	--without-bearssl \
 	--without-wolfssl \
@@ -46,24 +49,29 @@ configure_args := \
 	--without-brotli \
 	--without-zstd \
 	--without-zlib \
-	--without-ca-bundle \
+	--with-ca-bundle=/$(ca_bundle_dst) \
 	--without-ca-path
 
 $(curl_tarball_path):
-	@if ! wget "$(curl_url_primary)"; then \
+	@if ! env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u all_proxy wget "$(curl_url_primary)"; then \
 		rm -f "$(curl_tarball_path)"; \
-		wget "$(curl_url_fallback)"; \
+		env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u all_proxy wget "$(curl_url_fallback)"; \
 	fi
 
 $(curl_dir): $(curl_tarball_path)
 	mkdir -p $(build_dir)
 	tar -xJf $< -C $(build_dir)
 
-$(bin): $(curl_dir)
+$(mbedtls_prefix)/lib/libmbedtls.a:
+	$(MAKE) -C ../mbedtls ARCH=$(ARCH) install DADK_CURRENT_BUILD_DIR=$(mbedtls_root)
+
+$(bin): $(mbedtls_prefix)/lib/libmbedtls.a $(curl_dir)
 	cd $(curl_dir) && \
 	PKG_CONFIG=/bin/false \
 	CC="$(cc)" AR="$(ar)" RANLIB="$(ranlib)" STRIP="$(strip)" \
-	CFLAGS="-Os -static" LDFLAGS="-static" \
+	CPPFLAGS="-I$(mbedtls_prefix)/include" \
+	CFLAGS="-Os -static" \
+	LDFLAGS="-static -L$(mbedtls_prefix)/lib" \
 	./configure $(configure_args)
 	cd $(curl_dir) && \
 	$(MAKE) CURL_LDFLAGS_BIN="-all-static" -j$(nproc)
@@ -76,7 +84,10 @@ $(bin): $(curl_dir)
 all: $(bin)
 
 install: all
-	cp $(bin) $(DADK_CURRENT_BUILD_DIR)/curl
+	mkdir -p $(DADK_CURRENT_BUILD_DIR)/bin
+	cp $(bin) $(DADK_CURRENT_BUILD_DIR)/bin/curl
+	mkdir -p $(DADK_CURRENT_BUILD_DIR)/$(dir $(ca_bundle_dst))
+	cp $(ca_bundle_src) $(DADK_CURRENT_BUILD_DIR)/$(ca_bundle_dst)
 
 clean:
 	rm -rf build/
