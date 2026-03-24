@@ -12,8 +12,8 @@ use crate::{
 };
 
 use super::{
-    abi::WaitOption, resource::RUsage, ProcessControlBlock, ProcessFlags, ProcessManager,
-    ProcessState, RawPid,
+    abi::WaitOption, resource::{RUsage, RUsageWho}, ProcessControlBlock, ProcessFlags,
+    ProcessManager, ProcessState, RawPid,
 };
 
 /// 将内核中保存的 wstatus（已经按 wait4 语义左移过的编码值）
@@ -64,7 +64,9 @@ fn should_defer_unhash_for_group_exec(pcb: &ProcessControlBlock, group_dead: boo
 /// - 默认（无 __WCLONE）: 只等待"正常"子进程（exit_signal == SIGCHLD）
 fn child_matches_wait_options(child_pcb: &Arc<ProcessControlBlock>, options: WaitOption) -> bool {
     // __WALL 匹配所有子进程
-    if options.contains(WaitOption::WALL) {
+    if options.contains(WaitOption::WALL)
+        || child_pcb.flags().contains(ProcessFlags::PTRACED)
+    {
         return true;
     }
 
@@ -74,6 +76,23 @@ fn child_matches_wait_options(child_pcb: &Arc<ProcessControlBlock>, options: Wai
 
     // 子进程类型必须与等待选项匹配
     is_clone_child == wants_clone
+}
+
+#[inline]
+fn fill_wait_rusage(kwo: &mut KernelWaitOption, child_pcb: &Arc<ProcessControlBlock>) {
+    if let Some(rusage) = kwo.ret_rusage.as_deref_mut() {
+        *rusage = child_pcb.get_rusage(RUsageWho::RUsageBoth).unwrap_or_default();
+    }
+}
+
+#[inline]
+fn mark_child_waited_and_reap(child_pcb: &Arc<ProcessControlBlock>) -> Option<RawPid> {
+    if !child_pcb.try_mark_dead_from_zombie() {
+        return None;
+    }
+
+    ProcessManager::current_pcb().accumulate_waited_child_rusage(child_pcb);
+    Some(child_pcb.raw_pid())
 }
 
 /// 内核wait4时的参数
@@ -271,7 +290,7 @@ fn do_wait(kwo: &mut KernelWaitOption) -> Result<usize, SystemError> {
     // todo: 在signal struct里面增加等待队列，并在这里初始化子进程退出的回调，使得子进程退出时，能唤醒当前进程。
 
     kwo.no_task_error = Some(SystemError::ECHILD);
-    let retval = match &kwo.pid_converter {
+    let retval = match kwo.pid_converter.clone() {
         PidConverter::Pid(pid) => {
             if pid.pid_vnr().data() == ProcessManager::current_pcb().raw_tgid().data() {
                 return Err(SystemError::ECHILD);
@@ -357,6 +376,9 @@ fn do_wait(kwo: &mut KernelWaitOption) -> Result<usize, SystemError> {
                             Some(p) => p,
                             None => continue,
                         };
+                        if pcb.is_dead() {
+                            continue;
+                        }
                         if !is_eligible_child(&pcb, kwo.options) {
                             continue;
                         }
@@ -383,6 +405,7 @@ fn do_wait(kwo: &mut KernelWaitOption) -> Result<usize, SystemError> {
                                 cause: SigChildCode::Stopped.into(),
                             });
                             kwo.ret_status = (stopsig << 8) | 0x7f;
+                            fill_wait_rusage(kwo, &pcb);
                             if !kwo.options.contains(WaitOption::WNOWAIT) {
                                 pcb.sighand().flags_remove(SignalFlags::CLD_STOPPED);
                             }
@@ -399,6 +422,7 @@ fn do_wait(kwo: &mut KernelWaitOption) -> Result<usize, SystemError> {
                                 cause: SigChildCode::Continued.into(),
                             });
                             kwo.ret_status = 0xffff;
+                            fill_wait_rusage(kwo, &pcb);
                             if !kwo.options.contains(WaitOption::WNOWAIT) {
                                 pcb.sighand().flags_remove(SignalFlags::CLD_CONTINUED);
                             }
@@ -423,13 +447,14 @@ fn do_wait(kwo: &mut KernelWaitOption) -> Result<usize, SystemError> {
                                 status: status8,
                                 cause: SigChildCode::Exited.into(),
                             });
+                            fill_wait_rusage(kwo, &pcb);
                             tmp_child_pcb = Some(pcb.clone());
                             if !kwo.options.contains(WaitOption::WNOWAIT) {
-                                if !pcb.try_mark_dead_from_zombie() {
+                                let Some(pid) = mark_child_waited_and_reap(&pcb) else {
                                     drop(sched_guard);
                                     continue;
-                                }
-                                pid_to_release = Some(pcb.raw_pid());
+                                };
+                                pid_to_release = Some(pid);
                             }
                             scan_result = Some(Ok((*pid).into()));
                             drop(sched_guard);
@@ -472,6 +497,9 @@ fn do_wait(kwo: &mut KernelWaitOption) -> Result<usize, SystemError> {
                                 Some(p) => p,
                                 None => continue,
                             };
+                            if pcb.is_dead() {
+                                continue;
+                            }
 
                             if !is_eligible_child(&pcb, kwo.options) {
                                 continue;
@@ -499,6 +527,7 @@ fn do_wait(kwo: &mut KernelWaitOption) -> Result<usize, SystemError> {
                                     cause: SigChildCode::Stopped.into(),
                                 });
                                 kwo.ret_status = (stopsig << 8) | 0x7f;
+                                fill_wait_rusage(kwo, &pcb);
                                 if !kwo.options.contains(WaitOption::WNOWAIT) {
                                     pcb.sighand().flags_remove(SignalFlags::CLD_STOPPED);
                                 }
@@ -515,6 +544,7 @@ fn do_wait(kwo: &mut KernelWaitOption) -> Result<usize, SystemError> {
                                     cause: SigChildCode::Continued.into(),
                                 });
                                 kwo.ret_status = 0xffff;
+                                fill_wait_rusage(kwo, &pcb);
                                 if !kwo.options.contains(WaitOption::WNOWAIT) {
                                     pcb.sighand().flags_remove(SignalFlags::CLD_CONTINUED);
                                 }
@@ -539,13 +569,14 @@ fn do_wait(kwo: &mut KernelWaitOption) -> Result<usize, SystemError> {
                                     status: status8,
                                     cause: SigChildCode::Exited.into(),
                                 });
+                                fill_wait_rusage(kwo, &pcb);
                                 tmp_child_pcb = Some(pcb.clone());
                                 if !kwo.options.contains(WaitOption::WNOWAIT) {
-                                    if !pcb.try_mark_dead_from_zombie() {
+                                    let Some(pid) = mark_child_waited_and_reap(&pcb) else {
                                         drop(sched_guard);
                                         continue;
-                                    }
-                                    pid_to_release = Some(pcb.raw_pid());
+                                    };
+                                    pid_to_release = Some(pid);
                                 }
                                 scan_result = Some(Ok((*pid).into()));
                                 drop(sched_guard);
@@ -614,6 +645,9 @@ fn do_wait(kwo: &mut KernelWaitOption) -> Result<usize, SystemError> {
                             Some(p) => p,
                             None => continue,
                         };
+                        if pcb.is_dead() {
+                            continue;
+                        }
 
                         if !is_eligible_child(&pcb, kwo.options) {
                             continue;
@@ -621,7 +655,7 @@ fn do_wait(kwo: &mut KernelWaitOption) -> Result<usize, SystemError> {
 
                         let child_pgrp = pcb.task_pgrp();
                         let in_target_pgrp = match &child_pgrp {
-                            Some(cp) => Arc::ptr_eq(cp, pgid),
+                            Some(cp) => Arc::ptr_eq(cp, &pgid),
                             None => false,
                         };
                         if !in_target_pgrp {
@@ -651,6 +685,7 @@ fn do_wait(kwo: &mut KernelWaitOption) -> Result<usize, SystemError> {
                                 cause: SigChildCode::Stopped.into(),
                             });
                             kwo.ret_status = (stopsig << 8) | 0x7f;
+                            fill_wait_rusage(kwo, &pcb);
                             if !kwo.options.contains(WaitOption::WNOWAIT) {
                                 pcb.sighand().flags_remove(SignalFlags::CLD_STOPPED);
                             }
@@ -667,6 +702,7 @@ fn do_wait(kwo: &mut KernelWaitOption) -> Result<usize, SystemError> {
                                 cause: SigChildCode::Continued.into(),
                             });
                             kwo.ret_status = 0xffff;
+                            fill_wait_rusage(kwo, &pcb);
                             if !kwo.options.contains(WaitOption::WNOWAIT) {
                                 pcb.sighand().flags_remove(SignalFlags::CLD_CONTINUED);
                             }
@@ -691,13 +727,14 @@ fn do_wait(kwo: &mut KernelWaitOption) -> Result<usize, SystemError> {
                                 status: status8,
                                 cause: SigChildCode::Exited.into(),
                             });
+                            fill_wait_rusage(kwo, &pcb);
                             tmp_child_pcb = Some(pcb.clone());
                             if !kwo.options.contains(WaitOption::WNOWAIT) {
-                                if !pcb.try_mark_dead_from_zombie() {
+                                let Some(pid) = mark_child_waited_and_reap(&pcb) else {
                                     drop(sched_guard);
                                     continue;
-                                }
-                                pid_to_release = Some(pcb.raw_pid());
+                                };
+                                pid_to_release = Some(pid);
                             }
                             drop(sched_guard);
                             scan_result = Some(Ok(pcb.task_pid_vnr().into()));
@@ -748,7 +785,7 @@ fn do_wait(kwo: &mut KernelWaitOption) -> Result<usize, SystemError> {
 
                             let child_pgrp = pcb.task_pgrp();
                             let in_target_pgrp = match &child_pgrp {
-                                Some(cp) => Arc::ptr_eq(cp, pgid),
+                                Some(cp) => Arc::ptr_eq(cp, &pgid),
                                 None => false,
                             };
                             if !in_target_pgrp {
@@ -779,6 +816,7 @@ fn do_wait(kwo: &mut KernelWaitOption) -> Result<usize, SystemError> {
                                     cause: SigChildCode::Stopped.into(),
                                 });
                                 kwo.ret_status = (stopsig << 8) | 0x7f;
+                                fill_wait_rusage(kwo, &pcb);
                                 if !kwo.options.contains(WaitOption::WNOWAIT) {
                                     pcb.sighand().flags_remove(SignalFlags::CLD_STOPPED);
                                 }
@@ -795,6 +833,7 @@ fn do_wait(kwo: &mut KernelWaitOption) -> Result<usize, SystemError> {
                                     cause: SigChildCode::Continued.into(),
                                 });
                                 kwo.ret_status = 0xffff;
+                                fill_wait_rusage(kwo, &pcb);
                                 if !kwo.options.contains(WaitOption::WNOWAIT) {
                                     pcb.sighand().flags_remove(SignalFlags::CLD_CONTINUED);
                                 }
@@ -819,13 +858,14 @@ fn do_wait(kwo: &mut KernelWaitOption) -> Result<usize, SystemError> {
                                     status: status8,
                                     cause: SigChildCode::Exited.into(),
                                 });
+                                fill_wait_rusage(kwo, &pcb);
                                 tmp_child_pcb = Some(pcb.clone());
                                 if !kwo.options.contains(WaitOption::WNOWAIT) {
-                                    if !pcb.try_mark_dead_from_zombie() {
+                                    let Some(pid) = mark_child_waited_and_reap(&pcb) else {
                                         drop(sched_guard);
                                         continue;
-                                    }
-                                    pid_to_release = Some(pcb.raw_pid());
+                                    };
+                                    pid_to_release = Some(pid);
                                 }
                                 scan_result = Some(Ok(pcb.task_pid_vnr().into()));
                                 drop(sched_guard);
@@ -892,10 +932,15 @@ fn do_wait(kwo: &mut KernelWaitOption) -> Result<usize, SystemError> {
     return retval;
 }
 
+// todo(mistcoversmyeyes):
 fn do_waitpid(
     child_pcb: Arc<ProcessControlBlock>,
     kwo: &mut KernelWaitOption,
 ) -> Option<Result<usize, SystemError>> {
+    if child_pcb.is_dead() {
+        return Some(Err(SystemError::ECHILD));
+    }
+
     // 优先处理继续事件：与 Linux 语义一致，只要标志存在即可报告
     if kwo.options.contains(WaitOption::WCONTINUED)
         && child_pcb
@@ -915,6 +960,7 @@ fn do_waitpid(
         // 设置 ret_status 供 wait4 使用
         // Linux wait(2) 语义：continued 进程的 wstatus = 0xffff
         kwo.ret_status = 0xffff;
+        fill_wait_rusage(kwo, &child_pcb);
 
         if !kwo.options.contains(WaitOption::WNOWAIT) {
             child_pcb.sighand().flags_remove(SignalFlags::CLD_CONTINUED);
@@ -958,6 +1004,7 @@ fn do_waitpid(
             // 设置 ret_status 供 wait4 使用
             // Linux wait(2) 语义：stopped 进程的 wstatus = (stopsig << 8) | 0x7f
             kwo.ret_status = (stopsig << 8) | 0x7f;
+            fill_wait_rusage(kwo, &child_pcb);
 
             if !kwo.options.contains(WaitOption::WNOWAIT) {
                 // 消费一次停止事件标志（若存在）
@@ -988,14 +1035,15 @@ fn do_waitpid(
             });
 
             kwo.ret_status = status as i32;
+            fill_wait_rusage(kwo, &child_pcb);
 
             // 若指定 WNOWAIT，则只观测不回收
             if !kwo.options.contains(WaitOption::WNOWAIT) {
-                if !child_pcb.try_mark_dead_from_zombie() {
+                let Some(pid_to_release) = mark_child_waited_and_reap(&child_pcb) else {
                     drop(child_pcb);
                     return Some(Err(SystemError::ECHILD));
-                }
-                unsafe { ProcessManager::release(child_pcb.raw_pid()) };
+                };
+                unsafe { ProcessManager::release(pid_to_release) };
                 drop(child_pcb);
             } else {
                 // 观测模式下不回收，保持任务可再次被 wait 系列看到

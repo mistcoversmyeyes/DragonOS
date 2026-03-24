@@ -1,9 +1,11 @@
 use num_traits::FromPrimitive;
 use system_error::SystemError;
 
+use core::sync::atomic::Ordering;
+
 use crate::time::PosixTimeSpec;
 
-use super::ProcessControlBlock;
+use super::{ProcessControlBlock, ProcessManager};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(C)]
@@ -138,14 +140,54 @@ impl TryFrom<usize> for RLimitID {
 }
 
 impl ProcessControlBlock {
-    /// 获取进程资源使用情况
-    ///
-    /// ## TODO
-    ///
-    /// 当前函数尚未实现，只是返回了一个默认的RUsage结构体
-    pub fn get_rusage(&self, _who: RUsageWho) -> Option<RUsage> {
-        let rusage = RUsage::default();
+    fn children_rusage_owner(&self) -> alloc::sync::Arc<ProcessControlBlock> {
+        if self.is_thread_group_leader() {
+            return self
+                .self_ref
+                .upgrade()
+                .unwrap_or_else(ProcessManager::current_pcb);
+        }
 
-        Some(rusage)
+        self.threads_read_irqsave()
+            .group_leader()
+            .or_else(|| self.self_ref.upgrade())
+            .unwrap_or_else(ProcessManager::current_pcb)
+    }
+
+    pub fn children_utime_stime_ns(&self) -> (u64, u64) {
+        let owner = self.children_rusage_owner();
+        (
+            owner.children_utime_ns.load(Ordering::Relaxed),
+            owner.children_stime_ns.load(Ordering::Relaxed),
+        )
+    }
+
+    pub fn accumulate_waited_child_rusage(&self, child: &ProcessControlBlock) {
+        let owner = self.children_rusage_owner();
+        let (child_utime, child_stime) = child.process_utime_stime_ns();
+        let (desc_utime, desc_stime) = child.children_utime_stime_ns();
+        owner.children_utime_ns.fetch_add(
+            child_utime.saturating_add(desc_utime),
+            Ordering::Relaxed,
+        );
+        owner.children_stime_ns.fetch_add(
+            child_stime.saturating_add(desc_stime),
+            Ordering::Relaxed,
+        );
+    }
+
+    /// 获取进程资源使用情况
+    pub fn get_rusage(&self, who: RUsageWho) -> Option<RUsage> {
+        let (utime_ns, stime_ns) = match who {
+            RUsageWho::RUsageSelf | RUsageWho::RUsageBoth => self.process_utime_stime_ns(),
+            RUsageWho::RusageThread => self.thread_utime_stime_ns(),
+            RUsageWho::RUsageChildren => self.children_utime_stime_ns(),
+        };
+
+        Some(RUsage {
+            ru_utime: PosixTimeSpec::from_ns(utime_ns),
+            ru_stime: PosixTimeSpec::from_ns(stime_ns),
+            ..RUsage::default()
+        })
     }
 }

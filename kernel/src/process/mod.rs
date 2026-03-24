@@ -5,7 +5,7 @@ use core::{
     intrinsics::unlikely,
     mem::ManuallyDrop,
     str::FromStr,
-    sync::atomic::{compiler_fence, fence, AtomicBool, AtomicU8, AtomicUsize, Ordering},
+    sync::atomic::{compiler_fence, fence, AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering},
 };
 
 use alloc::{
@@ -24,7 +24,7 @@ use system_error::SystemError;
 use crate::{
     arch::{
         cpu::current_cpu_id,
-        ipc::signal::{AtomicSignal, SigSet, Signal},
+        ipc::signal::{AtomicSignal, SigFlags, SigSet, Signal},
         process::ArchPCBInfo,
         CurrentIrqArch, SigStackArch,
     },
@@ -560,17 +560,23 @@ impl ProcessManager {
                     .adopt_childen()
                     .unwrap_or_else(|e| panic!("adopte_childen failed: error: {e:?}"))
             };
-            // 在通知父进程之前，先标记为 Zombie，保证 wait 可见
-            current.set_exit_state_zombie();
             let r = current.parent_pcb.read_irqsave().upgrade();
             if r.is_none() {
                 return;
             }
             let parent_pcb = r.unwrap();
+            let auto_reap = current.parent_auto_reaps_on_exit(&parent_pcb);
+
+            if auto_reap {
+                current.set_exit_state_dead();
+            } else {
+                // 在通知父进程之前，先标记为 Zombie，保证 wait 可见
+                current.set_exit_state_zombie();
+            }
 
             // 检查子进程的exit_signal，只有在有效时才发送信号
             let exit_signal = current.exit_signal.load(Ordering::SeqCst);
-            if exit_signal != Signal::INVALID {
+            if exit_signal != Signal::INVALID && !auto_reap {
                 let r = crate::ipc::kill::send_signal_to_pcb(parent_pcb.clone(), exit_signal);
                 if let Err(e) = r {
                     warn!(
@@ -608,6 +614,7 @@ impl ProcessManager {
                         .wakeup_all(Some(ProcessState::Blocked(true)));
                 }
             }
+
             // todo: 这里还需要根据线程组的信息，决定信号的发送
         }
     }
@@ -1047,6 +1054,8 @@ bitflags! {
         const IN_IOWAIT = 1 << 13;
         /// 线程组 exec 期间延迟 PID/TGID/PGID/SID 的 unhash
         const DEFER_UNHASH = 1 << 14;
+        /// 任务已经通过 ptrace(PTRACE_TRACEME) 将自己标记为 tracee
+        const PTRACED = 1 << 15;
     }
 }
 
@@ -1174,6 +1183,10 @@ pub struct ProcessControlBlock {
 
     /// CPU时间片
     cpu_time: Arc<ProcessCpuTime>,
+    /// 已等待子进程累计的 user CPU 时间（ns）
+    children_utime_ns: AtomicU64,
+    /// 已等待子进程累计的 system CPU 时间（ns）
+    children_stime_ns: AtomicU64,
 
     /// 进程的robust lock列表
     robust_list: RwLock<Option<RobustListHead>>,
@@ -1314,6 +1327,8 @@ impl ProcessControlBlock {
                 itimers: SpinLock::new(ProcessItimers::default()),
                 posix_timers: SpinLock::new(posix_timer::ProcessPosixTimers::default()),
                 cpu_time: Arc::new(ProcessCpuTime::default()),
+                children_utime_ns: AtomicU64::new(0),
+                children_stime_ns: AtomicU64::new(0),
                 robust_list: RwLock::new(None),
                 rseq_state: RwLock::new(rseq::RseqState::new()),
                 cred: SpinLock::new(cred),
@@ -2085,6 +2100,23 @@ impl ProcessControlBlock {
     pub fn set_exit_state_zombie(&self) {
         self.exit_state
             .store(ExitState::Zombie as u8, Ordering::Release);
+    }
+
+    pub fn set_exit_state_dead(&self) {
+        self.exit_state
+            .store(ExitState::Dead as u8, Ordering::Release);
+    }
+
+    pub fn parent_auto_reaps_on_exit(&self, parent: &Arc<ProcessControlBlock>) -> bool {
+        if self.exit_signal.load(Ordering::SeqCst) != Signal::SIGCHLD {
+            return false;
+        }
+
+        let Some(sigchld_action) = parent.sighand().handler(Signal::SIGCHLD) else {
+            return false;
+        };
+
+        sigchld_action.is_ignore() || sigchld_action.flags().contains(SigFlags::SA_NOCLDWAIT)
     }
 
     pub fn try_mark_dead_from_zombie(&self) -> bool {

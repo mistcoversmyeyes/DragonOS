@@ -366,18 +366,14 @@ impl Default for InnerSigHand {
 }
 
 fn default_sighandlers() -> Vec<Sigaction> {
-    let mut r = vec![Sigaction::default(); MAX_SIG_NUM];
-    let mut sig_ign = Sigaction::default();
-    // 收到忽略的信号，重启系统调用
-    // Linux 对 SIGCHLD/SIGURG/SIGWINCH 默认忽略；这里显式设置 Ignore
-    sig_ign.set_action(SigactionType::SaHandler(SaHandlerType::Ignore));
-    sig_ign.flags_mut().insert(SigFlags::SA_RESTART);
-
-    r[Signal::SIGCHLD as usize - 1] = sig_ign;
-    r[Signal::SIGURG as usize - 1] = sig_ign;
-    r[Signal::SIGWINCH as usize - 1] = sig_ign;
-
-    r
+    // 默认信号处置应保持为 SIG_DFL。
+    //
+    // 对于 SIGCHLD/SIGURG/SIGWINCH，Linux 的“默认动作是忽略”并不等于
+    // 用户显式安装了 SIG_IGN。尤其是 SIGCHLD：只有显式 SIG_IGN 或
+    // SA_NOCLDWAIT 才会触发 auto-reap；默认处置仍然要求子进程可被 wait。
+    //
+    // 实际的“默认忽略”语义由 SIG_KERNEL_IGNORE_MASK 在信号投递路径处理。
+    vec![Sigaction::default(); MAX_SIG_NUM]
 }
 
 impl ProcessControlBlock {

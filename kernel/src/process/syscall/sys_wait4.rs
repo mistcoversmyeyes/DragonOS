@@ -8,7 +8,6 @@ use crate::syscall::table::Syscall;
 use crate::syscall::user_access::UserBufferWriter;
 use alloc::vec::Vec;
 use core::ffi::c_int;
-use core::ffi::c_void;
 use system_error::SystemError;
 
 pub struct SysWait4;
@@ -26,8 +25,8 @@ impl SysWait4 {
         args[2] as c_int
     }
 
-    fn rusage(args: &[usize]) -> *mut c_void {
-        args[3] as *mut c_void
+    fn rusage(args: &[usize]) -> *mut RUsage {
+        args[3] as *mut RUsage
     }
 }
 
