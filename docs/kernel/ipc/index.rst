@@ -10,4 +10,4 @@
    signal
    ipc_namespace
    rseq
-
+   shm_gvisor_failure_analysis
