@@ -7,7 +7,7 @@ use crate::{
     driver::tty::tty_core::TtyCore,
     ipc::signal_types::SignalFlags,
     ipc::syscall::sys_kill::PidConverter,
-    process::pid::PidType,
+    process::pid::{Pid, PidType},
     syscall::user_access::UserBufferWriter,
 };
 
@@ -284,6 +284,24 @@ fn get_thread_group_leader(pcb: &Arc<ProcessControlBlock>) -> Arc<ProcessControl
     ti.group_leader().unwrap_or_else(|| pcb.clone())
 }
 
+#[inline]
+fn resolve_wait_pid_target(
+    pid: &Arc<Pid>,
+    options: WaitOption,
+) -> Result<Arc<ProcessControlBlock>, SystemError> {
+    let child_pcb = pid.pid_task(PidType::PID).ok_or(SystemError::ECHILD)?;
+
+    if !is_eligible_child(&child_pcb, options) {
+        return Err(SystemError::ECHILD);
+    }
+
+    if !child_matches_wait_options(&child_pcb, options) {
+        return Err(SystemError::ECHILD);
+    }
+
+    Ok(child_pcb)
+}
+
 /// 参考 https://code.dragonos.org.cn/xref/linux-6.1.9/kernel/exit.c#1573
 fn do_wait(kwo: &mut KernelWaitOption) -> Result<usize, SystemError> {
     let mut tmp_child_pcb: Option<Arc<ProcessControlBlock>> = None;
@@ -296,22 +314,7 @@ fn do_wait(kwo: &mut KernelWaitOption) -> Result<usize, SystemError> {
                 return Err(SystemError::ECHILD);
             }
 
-            let child_pcb = pid.pid_task(PidType::PID).ok_or(SystemError::ECHILD)?;
-
             let current = ProcessManager::current_pcb();
-
-            // 检查子进程是否可以被当前线程等待
-            // 根据 Linux 语义：
-            // - 默认情况下，线程组中的任何线程都可以等待同一线程组中任何线程 fork 的子进程
-            // - 如果指定了 __WNOTHREAD，则只能等待当前线程自己创建的子进程
-            if !is_eligible_child(&child_pcb, kwo.options) {
-                return Err(SystemError::ECHILD);
-            }
-
-            // 检查子进程是否匹配等待选项（__WALL/__WCLONE）
-            if !child_matches_wait_options(&child_pcb, kwo.options) {
-                return Err(SystemError::ECHILD);
-            }
 
             // 获取用于等待的 PCB（线程组 leader 或当前线程，取决于 WNOTHREAD）
             let parent = get_thread_group_leader(&current);
@@ -320,7 +323,8 @@ fn do_wait(kwo: &mut KernelWaitOption) -> Result<usize, SystemError> {
             // 子进程退出时会发送信号并唤醒父进程的 wait_queue
             loop {
                 // Fast path: check without sleeping
-                if let Some(r) = do_waitpid(child_pcb.clone(), kwo) {
+                let child_pcb = resolve_wait_pid_target(&pid, kwo.options)?;
+                if let Some(r) = do_waitpid(child_pcb, kwo) {
                     break r;
                 }
                 if kwo.options.contains(WaitOption::WNOHANG) {
@@ -330,7 +334,14 @@ fn do_wait(kwo: &mut KernelWaitOption) -> Result<usize, SystemError> {
                 let mut ready: Option<Result<usize, SystemError>> = None;
                 let wait_res = parent.wait_queue.wait_event_interruptible(
                     || {
-                        if let Some(r) = do_waitpid(child_pcb.clone(), kwo) {
+                        let child_pcb = match resolve_wait_pid_target(&pid, kwo.options) {
+                            Ok(child_pcb) => child_pcb,
+                            Err(err) => {
+                                ready = Some(Err(err));
+                                return true;
+                            }
+                        };
+                        if let Some(r) = do_waitpid(child_pcb, kwo) {
                             ready = Some(r);
                             true
                         } else {
@@ -778,6 +789,9 @@ fn do_wait(kwo: &mut KernelWaitOption) -> Result<usize, SystemError> {
                                 Some(p) => p,
                                 None => continue,
                             };
+                            if pcb.is_dead() {
+                                continue;
+                            }
 
                             if !is_eligible_child(&pcb, kwo.options) {
                                 continue;
@@ -912,7 +926,6 @@ fn do_wait(kwo: &mut KernelWaitOption) -> Result<usize, SystemError> {
                 }
             }
         }
-
         PidConverter::Pgid(None) => {
             // 进程组不存在，直接返回 ECHILD
             // 这种情况发生在：进程组中的所有进程都已退出并被回收
