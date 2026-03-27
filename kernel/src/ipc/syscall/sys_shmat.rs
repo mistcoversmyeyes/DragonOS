@@ -75,6 +75,7 @@ pub(super) fn do_kernel_shmat(
             let vma = VMA::physmap(params, &mut address_write_guard.user_mapper.utable, flusher)?;
 
             // 将VMA加入到当前进程的VMA列表中
+            vma.mark_opened();
             address_write_guard.mappings.insert_vma(vma);
 
             region.start().data()
@@ -137,6 +138,7 @@ pub(super) fn do_kernel_shmat(
             vma_guard.set_mapped(true);
             vma_guard.set_shm_id(Some(id));
             drop(vma_guard);
+            vma.mark_opened();
 
             vaddr.data()
         }

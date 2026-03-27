@@ -616,7 +616,7 @@ impl Futex {
             return Ok(key);
         } else {
             // 匿名映射（包括栈、堆、匿名mmap等）
-            if let Some(shared_anon) = &vma_guard.shared_anon {
+            if let Some(shared_anon) = vma_guard.shared_anon() {
                 // 显式共享的匿名映射（MAP_SHARED | MAP_ANONYMOUS）
                 let shared = SharedKey {
                     kind: SharedKeyKind::SharedAnon { id: shared_anon.id },

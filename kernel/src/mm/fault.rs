@@ -245,10 +245,9 @@ impl PageFaultHandler {
                     entry.set_flags(EntryFlags::from_data(MMArch::ENTRY_FLAG_DIRTY));
                 }
             }
-        } else if vma.is_anonymous() {
-            ret = Self::do_anonymous_page(pfm);
         } else {
-            ret = Self::do_fault(pfm);
+            let ops = { vma.lock().vm_ops() };
+            ret = ops.fault(pfm);
         }
 
         vma.lock().set_mapped(true);
