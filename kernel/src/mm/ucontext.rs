@@ -1871,17 +1871,22 @@ impl VmaOperations for ShmVmaOps {
 
         let ipcns = ProcessManager::current_ipcns();
         let mut shm_manager_guard = ipcns.shm.lock();
-        if let Some(kernel_shm) = shm_manager_guard.get_mut(&shm_id) {
+        let should_destroy = if let Some(kernel_shm) = shm_manager_guard.get_mut(&shm_id) {
             kernel_shm.update_dtim();
             kernel_shm.decrease_count();
-            if kernel_shm.map_count() == 0 && kernel_shm.mode().contains(ShmFlags::SHM_DEST) {
-                shm_manager_guard.free_id(&shm_id);
-            }
+            kernel_shm.map_count() == 0 && kernel_shm.mode().contains(ShmFlags::SHM_DEST)
         } else {
             warn!(
                 "SysV SHM segment {:?} no longer exists while closing VMA",
                 shm_id
             );
+            false
+        };
+
+        if should_destroy {
+            if let Err(err) = shm_manager_guard.destroy_segment_pages(shm_id) {
+                warn!("Failed to destroy SysV SHM segment {:?}: {:?}", shm_id, err);
+            }
         }
     }
 

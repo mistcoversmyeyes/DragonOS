@@ -2,7 +2,7 @@ use crate::{
     arch::mm::LockedFrameAllocator,
     libs::align::page_align_up,
     mm::{
-        allocator::page_frame::{FrameAllocator, PageFrameCount, PhysPageFrame},
+        allocator::page_frame::{PageFrameCount, PhysPageFrame},
         page::{page_manager_lock, PageFlags, PageType},
         PhysAddr,
     },
@@ -170,18 +170,19 @@ impl ShmManager {
             PageFrameCount::from_bytes(page_align_up(size)).ok_or(SystemError::EINVAL)?;
         // 创建共享内存page，并添加到PAGE_MANAGER中
         let mut page_manager_guard = page_manager_lock();
-        let (paddr, _page) = page_manager_guard.create_pages(
+        let (paddr, pages) = page_manager_guard.create_pages(
             PageType::Shm,
             PageFlags::PG_UNEVICTABLE,
             &mut LockedFrameAllocator,
             page_count,
         )?;
+        let allocated_pages = PageFrameCount::new(pages.len());
 
         // 创建共享内存段信息结构体
         let current_cred = ProcessManager::current_pcb().cred();
         let kern_ipc_perm =
             KernIpcPerm::new_with_cred(shm_id, key, current_cred, shmflg & ShmFlags::PERM_MASK);
-        let shm_kernel = KernelShm::new(kern_ipc_perm, paddr, size);
+        let shm_kernel = KernelShm::new(kern_ipc_perm, paddr, size, allocated_pages);
 
         // 更新共享内存管理器相关映射表
         self.key2id.insert(key, shm_id);
@@ -205,6 +206,29 @@ impl ShmManager {
     pub fn free_id(&mut self, id: &ShmId) {
         self.id2shm.remove(id);
         self.id_allocator.free(id.0);
+    }
+
+    pub fn destroy_segment_pages(&mut self, id: ShmId) -> Result<(), SystemError> {
+        let (start_paddr, size, key) = {
+            let kernel_shm = self.id2shm.get(&id).ok_or(SystemError::EINVAL)?;
+            (
+                kernel_shm.shm_start_paddr,
+                kernel_shm.allocated_pages,
+                kernel_shm.kern_ipc_perm.key,
+            )
+        };
+
+        let mut cur_phys = PhysPageFrame::new(start_paddr);
+        let mut page_manager_guard = page_manager_lock();
+        for _ in 0..size.data() {
+            let paddr = cur_phys.phys_address();
+            page_manager_guard.remove_page(&paddr);
+            cur_phys = cur_phys.next();
+        }
+
+        self.free_id(&id);
+        self.free_key(&key);
+        Ok(())
     }
 
     pub fn ipc_info(&self, user_buf: *const u8, from_user: bool) -> Result<usize, SystemError> {
@@ -325,8 +349,7 @@ impl ShmManager {
         kernel_shm.set_mode(ShmFlags::SHM_DEST, true);
 
         let mut cur_phys = PhysPageFrame::new(kernel_shm.shm_start_paddr);
-        let count = PageFrameCount::from_bytes(page_align_up(kernel_shm.shm_size))
-            .ok_or(SystemError::EINVAL)?;
+        let count = kernel_shm.allocated_pages;
         let key = kernel_shm.kern_ipc_perm.key;
         let id = kernel_shm.kern_ipc_perm.id;
         let map_count = kernel_shm.map_count();
@@ -346,20 +369,8 @@ impl ShmManager {
             // 释放key，不让后续进程连接
             self.free_key(&key);
         } else {
-            // 释放共享内存物理页
-            for _ in 0..count.data() {
-                let paddr = cur_phys.phys_address();
-                unsafe {
-                    LockedFrameAllocator.free(paddr, PageFrameCount::new(1));
-                }
-                // 将已回收的物理页面对应的Page从PAGE_MANAGER中删去
-                page_manager_guard.remove_page(&paddr);
-                cur_phys = cur_phys.next();
-            }
-
-            // 释放key和id
-            self.free_id(&id);
-            self.free_key(&key)
+            drop(page_manager_guard);
+            self.destroy_segment_pages(id)?;
         }
 
         return Ok(0);
@@ -388,6 +399,8 @@ pub struct KernelShm {
     shm_start_paddr: PhysAddr,
     /// 共享内存段大小(bytes)，注意是用户指定的大小（未经过页面对齐）
     shm_size: usize,
+    /// 实际分配的物理页数，按 buddy 对齐。
+    allocated_pages: PageFrameCount,
     /// 映射计数
     map_count: usize,
     /// 最后一次 attach 的时间
@@ -403,12 +416,18 @@ pub struct KernelShm {
 }
 
 impl KernelShm {
-    pub fn new(kern_ipc_perm: KernIpcPerm, shm_start_paddr: PhysAddr, shm_size: usize) -> Self {
+    pub fn new(
+        kern_ipc_perm: KernIpcPerm,
+        shm_start_paddr: PhysAddr,
+        shm_size: usize,
+        allocated_pages: PageFrameCount,
+    ) -> Self {
         let shm_cprid = ProcessManager::current_pid();
         KernelShm {
             kern_ipc_perm,
             shm_start_paddr,
             shm_size,
+            allocated_pages,
             map_count: 0,
             shm_atim: PosixTimeSpec::new(0, 0),
             shm_dtim: PosixTimeSpec::new(0, 0),

@@ -52,11 +52,20 @@ impl Syscall for SysShmdtHandle {
             .ok_or(SystemError::EINVAL)?;
 
         // 判断vaddr是否为起始地址
-        if vma.lock().region().start() != vaddr {
-            return Err(SystemError::EINVAL);
-        }
+        let region = {
+            let guard = vma.lock();
+            if guard.region().start() != vaddr || guard.shm_id().is_none() {
+                return Err(SystemError::EINVAL);
+            }
+            *guard.region()
+        };
 
-        // 取消映射
+        let vma = address_write_guard
+            .mappings
+            .remove_vma(&region)
+            .ok_or(SystemError::EINVAL)?;
+
+        // 解除映射并释放 VMA；Drop 路径会执行 close_once()，从而完成 detach 记账。
         let flusher: PageFlushAll<MMArch> = PageFlushAll::new();
         vma.unmap(&mut address_write_guard.user_mapper.utable, flusher);
 

@@ -39,13 +39,17 @@ pub(super) fn do_kernel_shmat(
     shmflg: ShmFlags,
 ) -> Result<usize, SystemError> {
     let ipcns = ProcessManager::current_ipcns();
-    let mut shm_manager_guard = ipcns.shm.lock();
     let current_address_space = AddressSpace::current()?;
     let mut address_write_guard = current_address_space.write();
 
-    let kernel_shm = shm_manager_guard.get_mut(&id).ok_or(SystemError::EINVAL)?;
-    let size = page_align_up(kernel_shm.size());
-    let mut phys = PhysPageFrame::new(kernel_shm.start_paddr());
+    let (size, mut phys) = {
+        let mut shm_manager_guard = ipcns.shm.lock();
+        let kernel_shm = shm_manager_guard.get_mut(&id).ok_or(SystemError::EINVAL)?;
+        (
+            page_align_up(kernel_shm.size()),
+            PhysPageFrame::new(kernel_shm.start_paddr()),
+        )
+    };
     let count = PageFrameCount::from_bytes(size).unwrap();
     let r = match vaddr.data() {
         // 找到空闲区域并映射到共享内存
@@ -75,7 +79,7 @@ pub(super) fn do_kernel_shmat(
             let vma = VMA::physmap(params, &mut address_write_guard.user_mapper.utable, flusher)?;
 
             // 将VMA加入到当前进程的VMA列表中
-            vma.mark_opened();
+            vma.open()?;
             address_write_guard.mappings.insert_vma(vma);
 
             region.start().data()
@@ -138,17 +142,16 @@ pub(super) fn do_kernel_shmat(
             vma_guard.set_mapped(true);
             vma_guard.set_shm_id(Some(id));
             drop(vma_guard);
-            vma.mark_opened();
+            vma.open()?;
 
             vaddr.data()
         }
     };
 
     // 更新最后一次连接时间
+    let mut shm_manager_guard = ipcns.shm.lock();
+    let kernel_shm = shm_manager_guard.get_mut(&id).ok_or(SystemError::EINVAL)?;
     kernel_shm.update_atim();
-
-    // 映射计数增加
-    kernel_shm.increase_count();
 
     Ok(r)
 }
