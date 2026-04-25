@@ -7,6 +7,7 @@ normal/epoll_timeout_budget
 normal/devpts_dir_read
 normal/test_pivot_root
 normal/test_mount_reconfigure
+normal/test_fchown_o_path
 normal/proc_self_limits
 normal/sched_affinity
 normal/test_tlb_shootdown
