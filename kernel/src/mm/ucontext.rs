@@ -44,7 +44,7 @@ use super::{
         deallocate_page_frames, PageFrameCount, PhysPageFrame, VirtPageFrame, VirtPageFrameIter,
     },
     fault::{PageFaultHandler, PageFaultMessage},
-    page::{EntryFlags, Flusher, InactiveFlusher, Page, PageFlags, PageFlushAll, PageType},
+    page::{EntryFlags, Flusher, Page, PageFlags, PageType},
     syscall::{MadvFlags, MapFlags, MremapFlags, ProtFlags},
     MemoryManagementArch, PageTableKind, VirtAddr, VirtRegion, VmFaultReason, VmFlags,
 };
@@ -550,30 +550,22 @@ impl InnerAddressSpace {
                 if allocate_at_once {
                     let vma =
                         VMA::zeroed(page, count, vm_flags, flags, mapper, flusher, None, None)?;
-                    // 如果是共享匿名映射，则分配稳定身份
-                    if vm_flags.contains(VmFlags::VM_SHARED) {
-                        let mut g = vma.lock();
-                        g.shared_anon = Some(AnonSharedMapping::new(count.data()));
-                        // Set backing_pgoff to 0 as the base offset for shared-anon mappings.
-                        g.backing_pgoff = Some(0);
-                    }
                     Ok(vma)
                 } else {
-                    let vma = LockedVMA::new(VMA::new(
-                        VirtRegion::new(page.virt_address(), count.data() * MMArch::PAGE_SIZE),
-                        vm_flags,
-                        flags,
-                        None,
-                        None,
-                        false,
-                        VMA::anonymous_vm_ops(),
-                    ));
-                    if vm_flags.contains(VmFlags::VM_SHARED) {
-                        let mut g = vma.lock();
-                        g.shared_anon = Some(AnonSharedMapping::new(count.data()));
-                        g.backing_pgoff = Some(0);
-                    }
-                    Ok(vma)
+                    let region =
+                        VirtRegion::new(page.virt_address(), count.data() * MMArch::PAGE_SIZE);
+                    let vma = if vm_flags.contains(VmFlags::VM_SHARED) {
+                        VMA::new_shared_anon(
+                            region,
+                            vm_flags,
+                            flags,
+                            AnonSharedMapping::new(count.data()),
+                            0,
+                        )
+                    } else {
+                        VMA::new_process_private_anon(region, vm_flags, flags)
+                    };
+                    Ok(LockedVMA::new(vma))
                 }
             },
         )?;
@@ -686,14 +678,14 @@ impl InnerAddressSpace {
                         Some(pgoff),
                     )
                 } else {
-                    Ok(LockedVMA::new(VMA::new(
-                        VirtRegion::new(page.virt_address(), count.data() * MMArch::PAGE_SIZE),
+                    let region =
+                        VirtRegion::new(page.virt_address(), count.data() * MMArch::PAGE_SIZE);
+                    Ok(LockedVMA::new(VMA::new_regular_file_page_cache(
+                        region,
                         vm_flags,
                         flags,
-                        Some(file.clone()),
-                        Some(pgoff),
-                        false,
-                        VMA::file_vm_ops(),
+                        file.clone(),
+                        pgoff,
                     )))
                 }
             },
@@ -995,28 +987,20 @@ impl InnerAddressSpace {
 
         // 创建目标 VMA（初始不映射物理页；存在的页表项会在下面被移动/复制）。
         let new_vma: Arc<LockedVMA> = {
-            let vma = LockedVMA::new(VMA::new(
-                new_region,
-                vm_flags,
-                entry_flags,
-                vm_file.clone(),
-                if vm_file.is_some() || shared_anon.is_some() {
-                    Some(base_pgoff)
-                } else {
-                    None
-                },
-                false,
-                if vm_file.is_some() {
-                    VMA::file_vm_ops()
-                } else {
-                    VMA::anonymous_vm_ops()
-                },
-            ));
-            if let Some(shared) = shared_anon.clone() {
-                let mut vg = vma.lock();
-                vg.shared_anon = Some(shared);
-                vg.backing_pgoff = Some(base_pgoff);
-            }
+            let vma = if let Some(file) = vm_file.clone() {
+                VMA::new_regular_file_page_cache(
+                    new_region,
+                    vm_flags,
+                    entry_flags,
+                    file,
+                    base_pgoff,
+                )
+            } else if let Some(shared) = shared_anon.clone() {
+                VMA::new_shared_anon(new_region, vm_flags, entry_flags, shared, base_pgoff)
+            } else {
+                VMA::new_process_private_anon(new_region, vm_flags, entry_flags)
+            };
+            let vma = LockedVMA::new(vma);
             self.mappings.insert_vma(vma.clone());
             vma
         };
@@ -1157,8 +1141,6 @@ impl InnerAddressSpace {
             if let Some(after) = after {
                 self.mappings.insert_vma(after);
             }
-
-            cur_vma.unmap(&mut self.user_mapper.utable, &mut flusher);
         }
 
         // Shootdown first, then free physical pages
@@ -1787,6 +1769,31 @@ impl Default for UserMappings {
     }
 }
 
+/// VMA 后备对象分类标准
+///
+/// 这组 VmaOperations 的命名按 VMA 叶子分类对齐，而不是按具体缺页函数命名。
+///
+/// ```text
+/// VMA
+/// |-- FileBacked
+/// |   |-- RegularFilePageCache
+/// |   |-- Tmpfs/Shmem
+/// |   `-- DeviceFilePfnMap
+/// `-- NonFileBacked
+///     |-- ProcessPrivateAnon
+///     |-- SharedAnon
+///     |-- SysvShm
+///     |-- PosixShm
+///     `-- KernelPfnMap
+/// ```
+///
+/// 分类依据：
+/// - FileBacked 表示 VMA 由 VFS 文件身份创建或承载；其中普通文件走 page cache，
+///   设备文件可以通过 PFNMAP 暴露设备/驱动物理页。
+/// - NonFileBacked 表示 VMA 没有 VFS 文件身份；其中匿名页生命周期随进程/VMA，
+///   SysV/POSIX shm 等共享对象生命周期由内核对象维护。
+/// - PfnMap 表示用户 PTE 直接指向一段 PFN，语义接近 Linux 的 VM_PFNMAP/VM_IO；
+///   它不是普通匿名页，也不应参与普通 page-cache 后备逻辑。
 pub trait VmaOperations: core::fmt::Debug + Send + Sync {
     fn open(&self, _vma: &LockedVMA) -> Result<(), SystemError> {
         Ok(())
@@ -1814,18 +1821,31 @@ pub trait VmaOperations: core::fmt::Debug + Send + Sync {
 }
 
 #[derive(Debug)]
-pub struct AnonymousVmaOps;
+pub struct ProcessPrivateAnonVmaOps;
 
-impl VmaOperations for AnonymousVmaOps {
+impl VmaOperations for ProcessPrivateAnonVmaOps {
     unsafe fn fault(&self, pfm: &mut PageFaultMessage<'_>) -> VmFaultReason {
         PageFaultHandler::do_anonymous_page(pfm)
     }
 }
 
 #[derive(Debug)]
-pub struct FileVmaOps;
+pub struct SharedAnonVmaOps;
 
-impl VmaOperations for FileVmaOps {
+impl VmaOperations for SharedAnonVmaOps {
+    unsafe fn fault(&self, pfm: &mut PageFaultMessage<'_>) -> VmFaultReason {
+        PageFaultHandler::do_anonymous_page(pfm)
+    }
+
+    fn is_anonymous(&self, _vma: &VMA) -> bool {
+        false
+    }
+}
+
+#[derive(Debug)]
+pub struct RegularFilePageCacheVmaOps;
+
+impl VmaOperations for RegularFilePageCacheVmaOps {
     unsafe fn fault(&self, pfm: &mut PageFaultMessage<'_>) -> VmFaultReason {
         PageFaultHandler::do_fault(pfm)
     }
@@ -1836,18 +1856,22 @@ impl VmaOperations for FileVmaOps {
 }
 
 #[derive(Debug)]
-pub struct PhysicalVmaOps;
+pub struct KernelPfnMapVmaOps;
 
-impl VmaOperations for PhysicalVmaOps {
+impl VmaOperations for KernelPfnMapVmaOps {
     unsafe fn fault(&self, _pfm: &mut PageFaultMessage<'_>) -> VmFaultReason {
         VmFaultReason::VM_FAULT_SIGBUS
+    }
+
+    fn is_anonymous(&self, _vma: &VMA) -> bool {
+        false
     }
 }
 
 #[derive(Debug)]
-pub struct ShmVmaOps;
+pub struct SysvShmVmaOps;
 
-impl VmaOperations for ShmVmaOps {
+impl VmaOperations for SysvShmVmaOps {
     fn open(&self, vma: &LockedVMA) -> Result<(), SystemError> {
         let shm_id = match vma.lock().shm_id {
             Some(shm_id) => shm_id,
@@ -1892,6 +1916,10 @@ impl VmaOperations for ShmVmaOps {
 
     unsafe fn fault(&self, _pfm: &mut PageFaultMessage<'_>) -> VmFaultReason {
         VmFaultReason::VM_FAULT_SIGBUS
+    }
+
+    fn is_anonymous(&self, _vma: &VMA) -> bool {
+        false
     }
 }
 
@@ -2331,17 +2359,6 @@ impl VMASplitResult {
     }
 }
 
-/// Parameters for physmap operation
-#[derive(Debug)]
-pub struct PhysmapParams {
-    pub phys: PhysPageFrame,
-    pub destination: VirtPageFrame,
-    pub count: PageFrameCount,
-    pub vm_flags: VmFlags,
-    pub flags: EntryFlags<MMArch>,
-    pub shm_id: Option<ShmId>,
-}
-
 /// @brief 虚拟内存区域
 #[derive(Debug)]
 pub struct VMA {
@@ -2483,6 +2500,95 @@ impl VMA {
         }
     }
 
+    pub fn new_process_private_anon(
+        region: VirtRegion,
+        vm_flags: VmFlags,
+        flags: EntryFlags<MMArch>,
+    ) -> Self {
+        Self::new(
+            region,
+            vm_flags,
+            flags,
+            None,
+            None,
+            false,
+            Self::process_private_anon_vm_ops(),
+        )
+    }
+
+    pub fn new_shared_anon(
+        region: VirtRegion,
+        vm_flags: VmFlags,
+        flags: EntryFlags<MMArch>,
+        shared_anon: Arc<AnonSharedMapping>,
+        backing_pgoff: usize,
+    ) -> Self {
+        let mut vma = Self::new(
+            region,
+            vm_flags,
+            flags,
+            None,
+            Some(backing_pgoff),
+            false,
+            Self::shared_anon_vm_ops(),
+        );
+        vma.shared_anon = Some(shared_anon);
+        vma
+    }
+
+    pub fn new_regular_file_page_cache(
+        region: VirtRegion,
+        vm_flags: VmFlags,
+        flags: EntryFlags<MMArch>,
+        file: Arc<File>,
+        backing_pgoff: usize,
+    ) -> Self {
+        Self::new(
+            region,
+            vm_flags,
+            flags,
+            Some(file),
+            Some(backing_pgoff),
+            false,
+            Self::regular_file_page_cache_vm_ops(),
+        )
+    }
+
+    pub fn new_sysv_shm(
+        region: VirtRegion,
+        vm_flags: VmFlags,
+        flags: EntryFlags<MMArch>,
+        shm_id: ShmId,
+    ) -> Self {
+        let mut vma = Self::new(
+            region,
+            vm_flags,
+            flags,
+            None,
+            None,
+            false,
+            Self::sysv_shm_vm_ops(),
+        );
+        vma.shm_id = Some(shm_id);
+        vma
+    }
+
+    pub fn new_kernel_pfn_map(
+        region: VirtRegion,
+        vm_flags: VmFlags,
+        flags: EntryFlags<MMArch>,
+    ) -> Self {
+        Self::new(
+            region,
+            vm_flags,
+            flags,
+            None,
+            None,
+            false,
+            Self::kernel_pfn_map_vm_ops(),
+        )
+    }
+
     pub fn region(&self) -> &VirtRegion {
         return &self.region;
     }
@@ -2518,11 +2624,6 @@ impl VMA {
 
     pub fn set_flags(&mut self) {
         self.flags = MMArch::vm_get_page_prot(self.vm_flags);
-    }
-
-    #[inline(always)]
-    pub fn set_shm_id(&mut self, shm: Option<ShmId>) {
-        self.shm_id = shm;
     }
 
     #[inline(always)]
@@ -2593,22 +2694,28 @@ impl VMA {
     }
 
     #[inline(always)]
-    pub fn anonymous_vm_ops() -> Arc<dyn VmaOperations + Send + Sync> {
-        Arc::new(AnonymousVmaOps)
+    pub fn process_private_anon_vm_ops() -> Arc<dyn VmaOperations + Send + Sync> {
+        Arc::new(ProcessPrivateAnonVmaOps)
     }
 
     #[inline(always)]
-    pub fn file_vm_ops() -> Arc<dyn VmaOperations + Send + Sync> {
-        Arc::new(FileVmaOps)
+    pub fn shared_anon_vm_ops() -> Arc<dyn VmaOperations + Send + Sync> {
+        Arc::new(SharedAnonVmaOps)
     }
 
     #[inline(always)]
-    pub fn physmap_vm_ops(shm_id: Option<ShmId>) -> Arc<dyn VmaOperations + Send + Sync> {
-        if shm_id.is_some() {
-            Arc::new(ShmVmaOps)
-        } else {
-            Arc::new(PhysicalVmaOps)
-        }
+    pub fn regular_file_page_cache_vm_ops() -> Arc<dyn VmaOperations + Send + Sync> {
+        Arc::new(RegularFilePageCacheVmaOps)
+    }
+
+    #[inline(always)]
+    pub fn sysv_shm_vm_ops() -> Arc<dyn VmaOperations + Send + Sync> {
+        Arc::new(SysvShmVmaOps)
+    }
+
+    #[inline(always)]
+    pub fn kernel_pfn_map_vm_ops() -> Arc<dyn VmaOperations + Send + Sync> {
+        Arc::new(KernelPfnMapVmaOps)
     }
 
     pub fn pages(&self) -> VirtPageFrameIter {
@@ -2665,70 +2772,6 @@ impl VMA {
         }
     }
 
-    /// 把物理地址映射到虚拟地址
-    ///
-    /// @param params 物理映射参数
-    /// @param mapper 页表映射器
-    /// @param flusher 页表项刷新器
-    ///
-    /// @return 返回映射后的虚拟内存区域
-    pub fn physmap(
-        params: PhysmapParams,
-        mapper: &mut PageMapper,
-        mut flusher: impl Flusher<MMArch>,
-    ) -> Result<Arc<LockedVMA>, SystemError> {
-        let mut cur_phy = params.phys;
-        let mut cur_dest = params.destination;
-
-        for _ in 0..params.count.data() {
-            // 将物理页帧映射到虚拟页帧
-            let r = unsafe {
-                mapper.map_phys(
-                    cur_dest.virt_address(),
-                    cur_phy.phys_address(),
-                    params.flags,
-                )
-            }
-            .expect("Failed to map phys, may be OOM error");
-
-            // todo: 增加OOM处理
-
-            // 刷新TLB
-            flusher.consume(r);
-
-            cur_phy = cur_phy.next();
-            cur_dest = cur_dest.next();
-        }
-
-        let r: Arc<LockedVMA> = LockedVMA::new(VMA::new(
-            VirtRegion::new(
-                params.destination.virt_address(),
-                params.count.data() * MMArch::PAGE_SIZE,
-            ),
-            params.vm_flags,
-            params.flags,
-            None,
-            None,
-            true,
-            Self::physmap_vm_ops(params.shm_id),
-        ));
-        if let Some(id) = params.shm_id {
-            r.lock().set_shm_id(Some(id));
-        }
-
-        // 将VMA加入到anon_vma中
-        let mut page_manager_guard = page_manager_lock();
-        cur_phy = params.phys;
-        for _ in 0..params.count.data() {
-            let paddr = cur_phy.phys_address();
-            let page = page_manager_guard.get_unwrap(&paddr);
-            page.write().insert_vma(r.clone());
-            cur_phy = cur_phy.next();
-        }
-
-        return Ok(r);
-    }
-
     /// 从页分配器中分配一些物理页，并把它们映射到指定的虚拟地址，然后创建VMA
     /// ## 参数
     ///
@@ -2754,11 +2797,6 @@ impl VMA {
         file: Option<Arc<File>>,
         pgoff: Option<usize>,
     ) -> Result<Arc<LockedVMA>, SystemError> {
-        let vm_ops = if file.is_some() {
-            Self::file_vm_ops()
-        } else {
-            Self::anonymous_vm_ops()
-        };
         let mut cur_dest: VirtPageFrame = destination;
         // debug!(
         //     "VMA::zeroed: page_count = {:?}, destination={destination:?}",
@@ -2777,18 +2815,25 @@ impl VMA {
             flusher.consume(r);
             cur_dest = cur_dest.next();
         }
-        let r = LockedVMA::new(VMA::new(
-            VirtRegion::new(
-                destination.virt_address(),
-                page_count.data() * MMArch::PAGE_SIZE,
-            ),
-            vm_flags,
-            flags,
-            file,
-            pgoff,
-            true,
-            vm_ops,
-        ));
+        let region = VirtRegion::new(
+            destination.virt_address(),
+            page_count.data() * MMArch::PAGE_SIZE,
+        );
+        let mut vma = if let Some(file) = file {
+            Self::new_regular_file_page_cache(region, vm_flags, flags, file, pgoff.unwrap_or(0))
+        } else if vm_flags.contains(VmFlags::VM_SHARED) {
+            Self::new_shared_anon(
+                region,
+                vm_flags,
+                flags,
+                AnonSharedMapping::new(page_count.data()),
+                pgoff.unwrap_or(0),
+            )
+        } else {
+            Self::new_process_private_anon(region, vm_flags, flags)
+        };
+        vma.set_mapped(true);
+        let r = LockedVMA::new(vma);
         drop(flusher);
         // debug!("VMA::zeroed: flusher dropped");
 

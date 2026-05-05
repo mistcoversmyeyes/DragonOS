@@ -1,10 +1,8 @@
 use crate::arch::interrupt::TrapFrame;
-use crate::mm::page::PageFlushAll;
 use crate::syscall::table::FormattedSyscallParam;
 use crate::{
     arch::syscall::nr::SYS_SHMDT,
-    arch::MMArch,
-    mm::{ucontext::AddressSpace, VirtAddr},
+    mm::{mmu_gather::MmuGather, ucontext::AddressSpace, VirtAddr},
     syscall::table::Syscall,
 };
 use alloc::vec::Vec;
@@ -66,8 +64,12 @@ impl Syscall for SysShmdtHandle {
             .ok_or(SystemError::EINVAL)?;
 
         // 解除映射并释放 VMA；Drop 路径会执行 close_once()，从而完成 detach 记账。
-        let flusher: PageFlushAll<MMArch> = PageFlushAll::new();
-        vma.unmap(&mut address_write_guard.user_mapper.utable, flusher);
+        {
+            let _pt_edit = current_address_space.page_table_edit();
+            let mut tlb = MmuGather::gather(&current_address_space);
+            vma.unmap(&mut address_write_guard.user_mapper.utable, &mut tlb);
+            tlb.finish();
+        }
 
         return Ok(0);
     }
