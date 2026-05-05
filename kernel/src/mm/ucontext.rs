@@ -1799,7 +1799,7 @@ pub trait VmaOperations: core::fmt::Debug + Send + Sync {
         Ok(())
     }
 
-    fn close(&self, _vma: &LockedVMA) {}
+    fn close(&self, _vma: &LockedVMA);
 
     unsafe fn fault(&self, pfm: &mut PageFaultMessage<'_>) -> VmFaultReason;
 
@@ -1824,6 +1824,8 @@ pub trait VmaOperations: core::fmt::Debug + Send + Sync {
 pub struct ProcessPrivateAnonVmaOps;
 
 impl VmaOperations for ProcessPrivateAnonVmaOps {
+    fn close(&self, _vma: &LockedVMA) {}
+
     unsafe fn fault(&self, pfm: &mut PageFaultMessage<'_>) -> VmFaultReason {
         PageFaultHandler::do_anonymous_page(pfm)
     }
@@ -1833,12 +1835,14 @@ impl VmaOperations for ProcessPrivateAnonVmaOps {
 pub struct SharedAnonVmaOps;
 
 impl VmaOperations for SharedAnonVmaOps {
+    fn close(&self, _vma: &LockedVMA) {}
+
     unsafe fn fault(&self, pfm: &mut PageFaultMessage<'_>) -> VmFaultReason {
         PageFaultHandler::do_anonymous_page(pfm)
     }
 
     fn is_anonymous(&self, _vma: &VMA) -> bool {
-        false
+        true
     }
 }
 
@@ -1846,6 +1850,8 @@ impl VmaOperations for SharedAnonVmaOps {
 pub struct RegularFilePageCacheVmaOps;
 
 impl VmaOperations for RegularFilePageCacheVmaOps {
+    fn close(&self, _vma: &LockedVMA) {}
+
     unsafe fn fault(&self, pfm: &mut PageFaultMessage<'_>) -> VmFaultReason {
         PageFaultHandler::do_fault(pfm)
     }
@@ -1859,6 +1865,8 @@ impl VmaOperations for RegularFilePageCacheVmaOps {
 pub struct KernelPfnMapVmaOps;
 
 impl VmaOperations for KernelPfnMapVmaOps {
+    fn close(&self, _vma: &LockedVMA) {}
+
     unsafe fn fault(&self, _pfm: &mut PageFaultMessage<'_>) -> VmFaultReason {
         VmFaultReason::VM_FAULT_SIGBUS
     }
