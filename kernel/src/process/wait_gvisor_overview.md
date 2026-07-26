@@ -77,3 +77,30 @@
 - `make qemu-nographic` 启动后自动运行 `/opt/tests/gvisor/tests/wait_test`。
 - 最终结果：`63/63` 通过。
 - 另有一条测试结束后的 `Init process (pid=1) attempted to group_exit with code 0` 日志，发生在 `wait_test` 汇总成功之后，不属于本轮 wait 语义回归。
+
+---
+
+## 五、2026-07-27 复验（master `ae28b352`，含 PR #2156）
+
+### 5.1 结论
+- 上游 PR #2156（"serialize non-leader exec handoff"）重写了 wait/exit/signal/ptrace 路径，**已完整覆盖本报告第四节的全部 6 个语义点**（rusage 写回、RUSAGE_CHILDREN 记账、SIGCHLD 默认处置区分、PTRACE_TRACEME、traced-child 匹配、wait(pid) 每轮按 pid 重解析）。本分支原两个内核修复提交退役，保存于 `origin/fix/wait_test`（`c7826515`、`a4fab1fe`）。
+- 纯 master 实测 61/63；修复下述两个非 wait 语义问题后 **63/63 稳定通过**。
+
+### 5.2 残余失败 1：`AfterChildExecve/{0,1}` —— rootfs 缺 `/bin/true`
+- 现象：wait 得到 status 512（WEXITSTATUS=2），期望 0。
+- 机制：测试在子进程 `clone(CLONE_THREAD|CLONE_VFORK)` 的线程里 `execve("/bin/true")`；rootfs 无该文件 → execve 返回 ENOENT → errno 经共享 TLS 传回 leader → `_exit(2)`。与 wait 语义无关。
+- 修复：`user/apps/busybox/Makefile` install 目标增加 `cp $(bin) $(DADK_CURRENT_BUILD_DIR)/true`（与 `sh` 同模式；gvisor 白名单内仅 `wait_test` 引用 `/bin/true`）。
+
+### 5.3 残余失败 2：`ForkBlock/0` 偶发早返 —— nanosleep 时基漂移
+- 现象：一次全量运行中父进程测得 4.648s < 5s；单独 `--gtest_repeat=6` 12/12 通过，非系统性。
+- 根因：`nanosleep` 纯按 LAPIC tick 计数到期（HZ=250，5s=1250 tick，`kernel/src/time/sleep.rs`），而 `clock_gettime` 走 kvm-clock 时钟源。WSL2 嵌套 KVM 下 vCPU steal 使 tick 积压后突发补注入，tick 域短暂快于真实时间，1250 tick 可在 4.648s 内数满；原 `sleep.rs` 正常到期分支不校验 deadline 直接返回，构成 POSIX 违规（无信号早返）。串口 clocksource watchdog 日志（`cs_dev_nsec=508000000`=127×4ms tick vs `wd_dev_nsec=579223209`，jiffies 被标 unstable）是同一 tick 抖动的反相印证。
+- 修复：`nanosleep` 改为 deadline 循环——每轮 timer 到期后用 `monotonic_now()` 对照 `sleep_deadline`，不足按余量续睡；信号中断且 deadline 未到才返回 `ERESTARTSYS`。
+- 长线方向（未做）：TSC fallback 校准窗缺陷（PIT 路径恒失败）与 nanosleep 迁移到 clocksource 基 hrtimer 语义，见时间子系统，与本轮无耦合。
+
+### 5.4 复验数据
+| 轮次 | 内核 | 条件 | 结果 |
+|---|---|---|---|
+| A | master | 无 /bin/true | 61/63（AfterChildExecve ×2 失败，exit code 2） |
+| B | master | 补 /bin/true | 62/63（ForkBlock/0 偶发 4.648s）；ForkBlock 单测 ×6 轮 12/12 |
+| C | master | 补 /bin/true | 63/63 |
+| D | master+nanosleep 修复 | 补 /bin/true | ForkBlock ×6 轮 12/12（5011–5046ms，离散度收敛）；全量 **63/63** |

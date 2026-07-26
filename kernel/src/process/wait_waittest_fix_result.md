@@ -1,5 +1,7 @@
 # wait_test 修复结果
 
+> **2026-07-27 更新**：本文档记录的三批内核修复已被上游 PR #2156 完整取代（详见 `wait_gvisor_overview.md` 第五节）。master `ae28b352` 上的残余失败为 rootfs 缺 `/bin/true`（AfterChildExecve）与 `nanosleep` tick 域早返（ForkBlock 偶发），分别在 `user/apps/busybox/Makefile` 与 `kernel/src/time/sleep.rs` 修复后，全量 `63/63` 稳定通过。以下为 2026-03-25 的历史记录。
+
 ## 最终验证
 
 - 内核编译：`make kernel` 通过
