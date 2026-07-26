@@ -35,6 +35,22 @@ pub fn nanosleep(sleep_time: PosixTimeSpec) -> Result<(), SystemError> {
     }
 
     let sleep_deadline = monotonic_now().saturating_add_ktime(&sleep_time);
+    let mut remaining = sleep_time;
+    loop {
+        let round = wait_one_timer_round(&remaining);
+        remaining = sleep_deadline.saturating_sub_timespec(&monotonic_now());
+        if remaining.is_empty() {
+            return Ok(());
+        }
+        round?;
+    }
+}
+
+/// Sleep for one timer-wheel round. Timer jiffies may run ahead of the
+/// monotonic clocksource when a hypervisor injects backlogged ticks in a
+/// burst, so the caller must re-check the real deadline after every round
+/// and re-arm for the remainder.
+fn wait_one_timer_round(sleep_time: &PosixTimeSpec) -> Result<(), SystemError> {
     let total_sleep_time_us = sleep_time.to_ktime_ns().div_ceil(1000);
     let (waiter, waker) = Waiter::new_pair();
     let handler: Box<TimeoutWaker> = TimeoutWaker::new(waker);
@@ -43,26 +59,9 @@ pub fn nanosleep(sleep_time: PosixTimeSpec) -> Result<(), SystemError> {
 
     timer.activate();
 
-    match waiter.wait(true) {
-        Ok(()) => {
-            debug_assert!(timer.timeout());
-            Ok(())
-        }
-        Err(SystemError::ERESTARTSYS) => {
-            timer.cancel();
-            if timer.timeout()
-                || sleep_deadline
-                    .saturating_sub_timespec(&monotonic_now())
-                    .is_empty()
-            {
-                Ok(())
-            } else {
-                Err(SystemError::ERESTARTSYS)
-            }
-        }
-        Err(err) => {
-            timer.cancel();
-            Err(err)
-        }
+    let result = waiter.wait(true);
+    if result.is_err() {
+        timer.cancel();
     }
+    result
 }
