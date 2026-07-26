@@ -2,6 +2,12 @@
 
 本文记录一次在 DragonOS 上手动运行 gVisor `shm_test` 时发现的失败现象、最小复现、Linux 参考语义和 DragonOS 当前实现差异。
 
+```{note}
+**历史文档（已结案）**：本文分析对象是 2026-06 时基于旧版 `kernel/src/mm/ucontext.rs`
+（单文件实现，SHM 预分配连续物理页 + 手工 attach 计数）的代码。文中的失败现象与根因
+已随上游重构失效，结论见文末「七、后记：上游解决与验证」。
+```
+
 ## 分析对象
 
 - gVisor 测试代码：`../gvisor/test/syscalls/linux/shm.cc`
@@ -408,3 +414,39 @@ cd /opt/tests/gvisor
 本次失败的核心不是普通 `shmat/shmdt` 语义错误，而是 SysV SHM 在 `IPC_RMID`、最后一个 attachment 关闭、task 异常退出三者交织时，生命周期回收路径不统一。
 
 Linux 通过 `shm_open()`、`__shm_close()`、`exit_shm()` 把这条路径收敛到了稳定语义；DragonOS 当前实现仍依赖 `unmap_all()` 和 `LockedVMA::Drop` 的隐式执行顺序，因此在 gVisor death test 组合下更容易出现页元数据污染，最终以 `phys page already exists` 和后续 `execve` panic 的形式暴露出来。
+
+## 七、后记：上游解决与验证（2026-07-26）
+
+### 7.1 上游重构
+
+本文提出的修复方向（统一 destroy helper、生命周期钩子驱动 attach 计数、显式的退出清理路径）
+已由上游两次重构以更彻底的方式实现：
+
+- PR #1986（`4bdfeb42`）`refactor(ipc): rework SysV SHM to tmpfs/pagecache backing for Linux compat`：
+  - SHM 段改为未链接 tmpfs/shmem 文件 + PageCache 后备，按需缺页分配，废弃预分配连续物理页；
+  - attach 计数（`nattch`）完全由统一的 VMA open/close 生命周期钩子驱动
+    （`SysVShmAttach::open_vma()/close_vma()`，见 `kernel/src/ipc/shm.rs`），
+    覆盖 shmat、fork、VMA split、mremap、munmap、shmdt、进程退出全部路径；
+  - `SysVShmAttach` 持有段所属的 `Arc<IpcNamespace>`，退出/execve 清理不再依赖
+    "当前进程的 namespace"，从根上消除了本文 3.4 节指出的销毁职责分裂；
+  - 销毁谓词收敛为单点：`SHM_DEST && nattch == 0 && pin_count == 0`
+    （`maybe_take_destroy_candidate_locked`），`IPC_RMID` 与最后一次 close 共用同一 helper；
+  - close 通知在 mm 写锁外统一派发（`VmaCloseNotifications`），split 采用
+    预 open + commit/rollback（`VmaSplitLifecycle`）保证计数恰好配对。
+- PR #1994（`5a22627b`）`refactor(mm): split ucontext into focused modules`：
+  `ucontext.rs` 拆分为 `kernel/src/mm/ucontext/` 模块目录，生命周期操作集中在 `vma_ops.rs`。
+
+### 7.2 验证结果
+
+在 `feat/vma_lifecycle` rebase 到 master（含上述重构）后实测：
+
+- 环境：QEMU/KVM x86_64，`-kernel bin/kernel/kernel.elf`，guest 内直接执行
+  `/opt/tests/gvisor/tests/shm_test`；
+- 同一次启动内连续运行完整套件 4 遍（含 `--gtest_repeat=3`）：
+  每遍均为 **23 passed / 1 skipped / 0 failed**（`ShmTest.ShmStat` 因非 gVisor 环境
+  `SKIP_IF(!IsRunningOnGvisor())` 按设计跳过）；
+- death test（`ShmDeathTest.*`）与普通用例组合连跑无状态污染，
+  原 `phys page already exists` / `execve` panic 不再复现；
+- 测试期间内核串口无任何新增 WARN/ERROR（仅存启动期驱动噪音）。
+
+本文作为该问题的根因分析与修复方向记录归档。
