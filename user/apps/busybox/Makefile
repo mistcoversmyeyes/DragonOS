@@ -58,6 +58,7 @@ all: $(bin)
 install: all
 	cp $(bin) $(DADK_CURRENT_BUILD_DIR)/busybox
 	cp $(bin) $(DADK_CURRENT_BUILD_DIR)/sh
+	cp $(bin) $(DADK_CURRENT_BUILD_DIR)/true
 
 # 交互式配置菜单
 menuconfig: $(busybox_dir)
