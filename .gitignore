@@ -33,3 +33,6 @@ __pycache__/
 *.cpio.xz
 *.cpio*
 .direnv/
+
+# worktrees
+*worktree*/
