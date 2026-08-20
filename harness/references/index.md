@@ -4,4 +4,4 @@
 
 | 参考资料 | 用途 |
 | --- | --- |
-| [DragonOS 发布助手能力说明](../agents/release_agent_capability.md) | 调研版本差异、生成发行日志及更新 ChangeLog 时的工作流参考。 |
+| [DragonOS 发布助手能力说明](../../docs/agents/release_agent_capability.md) | 调研版本差异、生成发行日志及更新 ChangeLog 时的工作流参考。 |

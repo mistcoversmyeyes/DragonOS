@@ -26,6 +26,6 @@
 
 ## 文档职责
 
-需求的权威入口是 [docs/product-specs/index.md](docs/product-specs/index.md)，设计意图和权衡的权威入口是 [docs/design-docs/index.md](docs/design-docs/index.md)，执行步骤位于 `docs/exec-plans/`。新增内容应进入对应职责的文档，避免在多个位置形成竞争定义。
+需求的权威入口是 [harness/product-specs/index.md](harness/product-specs/index.md)，设计意图和权衡的权威入口是 [harness/design-docs/index.md](harness/design-docs/index.md)，执行步骤位于 `harness/exec-plans/`。新增内容应进入对应职责的文档，避免在多个位置形成竞争定义。
 
-提交消息规则不在本文件重复定义。需要提交相关上下文时，先读 [docs/constraints/COMMIT.md](docs/constraints/COMMIT.md)，再进入其中链接的权威贡献规范。
+提交消息规则不在本文件重复定义。需要提交相关上下文时，先读 [harness/constraints/COMMIT.md](harness/constraints/COMMIT.md)，再进入其中链接的权威贡献规范。

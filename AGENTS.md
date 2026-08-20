@@ -9,7 +9,7 @@ AGENTS.md                              ← Harness 文档总地图
 ARCHITECTURE.md                        ← 系统边界、目录职责与阅读路由
 FORCE_CONSTRAIN.md                     ← 交互、兼容性、安全与开发强约束
 KEY_INFO_REMINDER.md                   ← 构建、Nix 环境与 QEMU 关键命令
-docs/                                  ← 深层 Harness 文档
+harness/                               ← 深层 Harness 文档
 ├── constraints/                       ← 局部操作约束入口
 │   └── COMMIT.md                      ← 提交上下文与权威规范入口
 ├── product-specs/                     ← 产品需求文档
