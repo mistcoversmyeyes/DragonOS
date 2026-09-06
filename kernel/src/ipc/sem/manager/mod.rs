@@ -1,7 +1,7 @@
 //! Namespace identity, lookup, quota and semaphore creation.
 use super::{
     abi::*,
-    set::{KernelSem, KernelSemSet, SemWakeBatch},
+    set::{KernelSem, KernelSemSet, SemUndoRegistry, SemWakeBatch},
 };
 use crate::{
     ipc::{
@@ -86,8 +86,8 @@ impl SemManager {
     /// the namespace lock. Concurrent growth can make a shrink unnecessary or
     /// consume the spare capacity; in either case leave the live registry intact.
     pub(crate) fn shrink_undo_registry(ipcns: &Arc<IpcNamespace>, semid: SemId) {
-        let mut spare = Vec::new();
-        let mut retired = Vec::new();
+        let mut spare = SemUndoRegistry::default();
+        let mut retired = SemUndoRegistry::default();
         let needed = {
             let mut manager = ipcns.sem.lock();
             let Ok(set) = manager.get_by_semid_checked_mut(semid) else {
@@ -95,7 +95,7 @@ impl SemManager {
             };
             set.shrink_undo_registry_prepared(&mut spare, &mut retired)
         };
-        if needed == 0 || spare.try_reserve_exact(needed).is_err() {
+        if needed == 0 || spare.prepare(needed).is_err() {
             return;
         }
         // Allocation is best-effort reclamation, not part of syscall success.

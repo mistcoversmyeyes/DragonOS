@@ -258,23 +258,28 @@ fn undo_registry_shrink_releases_empty_and_rechecks_concurrent_growth() {
     let semid = insert_test_set(&mut manager, SemKey::new(152), &[0]);
     let group = SemUndoGroup::new_for_test_bound_to(&INIT_IPC_NAMESPACE).unwrap();
     let set = manager.get_by_semid_checked_mut(semid).unwrap();
-    set.undo_groups.reserve_exact(64);
-    set.undo_groups
-        .push(SemUndoAssociation::Group(Arc::downgrade(&group)));
-    let mut spare = Vec::new();
-    let mut retired = Vec::new();
+    set.undo_groups.prepare(64).unwrap();
+    set.ensure_undo_group_registered_prepared(&group, &mut SemUndoRegistry::default())
+        .unwrap();
+    let mut spare = SemUndoRegistry::default();
+    let mut retired = SemUndoRegistry::default();
     let needed = set.shrink_undo_registry_prepared(&mut spare, &mut retired);
     assert_eq!(needed, 4);
-    spare.try_reserve_exact(needed).unwrap();
+    spare.prepare(needed).unwrap();
     // Simulate new associations arriving during unlocked preparation.
+    let mut owners = Vec::new();
     for _ in 0..8 {
-        set.undo_groups
-            .push(SemUndoAssociation::Group(Arc::downgrade(&group)));
+        let owner = SemUndoGroup::new_for_test_bound_to(&INIT_IPC_NAMESPACE).unwrap();
+        set.ensure_undo_group_registered_prepared(&owner, &mut SemUndoRegistry::default())
+            .unwrap();
+        owners.push(owner);
     }
     assert!(set.shrink_undo_registry_prepared(&mut spare, &mut retired) > 0);
     assert_eq!(set.undo_groups.len(), 9);
     assert_eq!(set.undo_groups.capacity(), 64);
-    set.undo_groups.truncate(1);
+    for owner in &owners {
+        set.unregister_undo_group(owner);
+    }
     assert_eq!(
         set.shrink_undo_registry_prepared(&mut spare, &mut retired),
         0
@@ -284,7 +289,7 @@ fn undo_registry_shrink_releases_empty_and_rechecks_concurrent_growth() {
     assert_eq!(spare.capacity(), 64);
     // The spare is already allocated when another owner empties the set.
     // It must not be installed back into the empty registry.
-    set.undo_groups.clear();
+    set.unregister_undo_group(&group);
     assert_eq!(
         set.shrink_undo_registry_prepared(&mut spare, &mut retired),
         0
@@ -294,11 +299,50 @@ fn undo_registry_shrink_releases_empty_and_rechecks_concurrent_growth() {
 }
 
 #[test]
+fn indexed_registry_removal_preserves_moved_groups_and_allows_reregistration() {
+    let mut registry = SemUndoRegistry::default();
+    registry.prepare(16).unwrap();
+    let mut spare = SemUndoRegistry::default();
+    let owners: Vec<_> = (0..6)
+        .map(|_| SemUndoGroup::new_for_test_bound_to(&INIT_IPC_NAMESPACE).unwrap())
+        .collect();
+    for owner in &owners {
+        registry.register_prepared(owner, &mut spare).unwrap();
+    }
+    // First removal moves the tail into slot zero; then remove a middle slot
+    // and the current tail. Duplicate/missing operations must remain harmless.
+    for index in [0, 2, 3] {
+        registry.unregister(&owners[index]);
+        registry.unregister(&owners[index]);
+    }
+    assert_eq!(registry.len(), 3);
+    for index in [1, 4, 5] {
+        registry
+            .register_prepared(&owners[index], &mut spare)
+            .unwrap();
+        assert_eq!(registry.len(), 3);
+        assert!(registry
+            .iter()
+            .any(|entry| { entry.group().ptr_eq(&Arc::downgrade(&owners[index])) }));
+    }
+    for index in [0, 2, 3] {
+        registry
+            .register_prepared(&owners[index], &mut spare)
+            .unwrap();
+    }
+    assert_eq!(registry.len(), owners.len());
+    for owner in &owners {
+        registry.unregister(owner);
+    }
+    assert!(registry.is_empty());
+}
+
+#[test]
 fn prepared_registry_growth_rechecks_registration_and_capacity() {
     let mut manager = SemManager::new();
     let semid = insert_test_set(&mut manager, SemKey::new(151), &[1]);
     let group = SemUndoGroup::new_for_test_bound_to(&INIT_IPC_NAMESPACE).unwrap();
-    let mut spare = Vec::new();
+    let mut spare = SemUndoRegistry::default();
     let capacity = manager
         .get_by_semid_checked_mut(semid)
         .unwrap()
@@ -310,7 +354,7 @@ fn prepared_registry_growth_rechecks_registration_and_capacity() {
         .unwrap()
         .undo_groups
         .is_empty());
-    spare.try_reserve(capacity).unwrap();
+    spare.prepare(capacity).unwrap();
 
     // Simulate other first-time groups consuming the prepared capacity
     // while this caller has dropped the manager lock.
@@ -332,7 +376,7 @@ fn prepared_registry_growth_rechecks_registration_and_capacity() {
         .ensure_undo_group_registered_prepared(&group, &mut spare)
         .unwrap_err();
     assert!(!manager.undo_registry_contains_for_test(&group));
-    spare.try_reserve(capacity).unwrap();
+    spare.prepare(capacity).unwrap();
     manager
         .get_by_semid_checked_mut(semid)
         .unwrap()
@@ -359,7 +403,7 @@ fn prepared_registry_growth_rechecks_registration_and_capacity() {
     }
 
     // A concurrent CLONE_SYSVSEM sharer already registered this group.
-    let mut empty_spare = Vec::new();
+    let mut empty_spare = SemUndoRegistry::default();
     manager
         .get_by_semid_checked_mut(semid)
         .unwrap()
@@ -479,22 +523,16 @@ fn stale_weak_entries_are_compacted_without_losing_live_group() {
     let live = SemUndoGroup::new_for_test_bound_to(&ipc_ns).unwrap();
     let candidate = SemUndoGroup::new_for_test_bound_to(&ipc_ns).unwrap();
     let stale = SemUndoGroup::new_for_test_bound_to(&ipc_ns).unwrap();
-    let stale_weak = Arc::downgrade(&stale);
-    drop(stale);
-
     let mut manager = ipc_ns.sem.lock();
     let semid = insert_test_set(&mut manager, SemKey::new(51), &[1]);
-    manager
-        .get_by_semid_checked_mut(semid)
-        .unwrap()
-        .undo_groups
-        .push(SemUndoAssociation::Group(stale_weak));
+    manager.ensure_undo_group_registered(&stale, semid).unwrap();
     manager.ensure_undo_group_registered(&live, semid).unwrap();
+    drop(stale);
     manager
         .get_by_semid_checked_mut(semid)
         .unwrap()
         .undo_groups
-        .shrink_to_fit();
+        .compact();
 
     manager
         .prepare_undo_record_and_registry_for_test(&candidate, semid)

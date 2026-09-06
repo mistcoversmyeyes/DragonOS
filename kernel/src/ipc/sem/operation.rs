@@ -8,13 +8,16 @@ use crate::{
         Duration,
     },
 };
-use alloc::{sync::Arc, vec::Vec};
+use alloc::sync::Arc;
 use system_error::SystemError;
 
 use super::{
     abi::*,
     manager::SemManager,
-    set::{SemAttempt, SemBlockedOp, SemQueueEntry, SemWaitType, SemWakeBatch, SemopScratch},
+    set::{
+        SemAttempt, SemBlockedOp, SemQueueEntry, SemUndoRegistry, SemWaitType, SemWakeBatch,
+        SemopScratch,
+    },
 };
 impl SemManager {
     pub(super) fn cancel_queued_entry(
@@ -144,14 +147,12 @@ impl SemManager {
         };
 
         let mut wakes = SemWakeBatch::default();
-        let mut registry_spare = Vec::new();
+        let mut registry_spare = SemUndoRegistry::default();
         let mut registry_capacity_needed = 0;
         let entry = loop {
             // Revalidate after unlocked undo-registry preparation.
             if registry_capacity_needed != 0 {
-                registry_spare
-                    .try_reserve(registry_capacity_needed)
-                    .map_err(|_| SystemError::ENOMEM)?;
+                registry_spare.prepare(registry_capacity_needed)?;
                 registry_capacity_needed = 0;
             }
             let nsems = {

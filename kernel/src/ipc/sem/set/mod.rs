@@ -22,10 +22,12 @@ use system_error::SystemError;
 use super::abi::*;
 mod operation;
 mod queue;
+mod undo_registry;
 pub(in crate::ipc::sem) use operation::{SemAttempt, SemBlockedOp, SemWaitType, SemopScratch};
 pub(in crate::ipc::sem) use queue::SemQueueEntry;
 use queue::SemWaitQueue;
 pub(crate) use queue::SemWakeBatch;
+pub(in crate::ipc::sem) use undo_registry::SemUndoRegistry;
 
 /// A single semaphore (fields of Linux `struct sem`)
 #[derive(Debug, Clone)]
@@ -63,7 +65,7 @@ impl SemUndoAssociation {
 #[derive(Debug)]
 pub struct KernelSemSet {
     /// Groups that can carry undo debt for this set, including queued operations.
-    undo_groups: Vec<SemUndoAssociation>,
+    undo_groups: SemUndoRegistry,
     /// Permission information
     kern_ipc_perm: IpcPerm,
     /// Semaphores in the set
@@ -81,7 +83,7 @@ pub struct KernelSemSet {
 impl KernelSemSet {
     /// Only call after RMID released the manager lock and delivered wakeups.
     pub(crate) fn reclaim_removed_undo_storage(&self) {
-        for association in &self.undo_groups {
+        for association in self.undo_groups.iter() {
             if let SemUndoAssociation::Retired { _group: group, .. } = association {
                 group.shrink_records();
             }
@@ -95,62 +97,21 @@ impl KernelSemSet {
     pub(in crate::ipc::sem) fn ensure_undo_group_registered_prepared(
         &mut self,
         group: &Arc<SemUndoGroup>,
-        spare: &mut Vec<SemUndoAssociation>,
+        spare: &mut SemUndoRegistry,
     ) -> Result<(), usize> {
-        debug_assert!(spare.is_empty());
-        let candidate = Arc::downgrade(group);
-        if self
-            .undo_groups
-            .iter()
-            .any(|entry| entry.group().ptr_eq(&candidate))
-        {
-            return Ok(());
-        }
-        if self.undo_groups.len() == self.undo_groups.capacity() {
-            self.compact_undo_registry();
-        }
-        if self.undo_groups.len() == self.undo_groups.capacity() {
-            if spare.capacity() <= self.undo_groups.len() {
-                return Err(self.undo_groups.len().saturating_mul(2).max(4));
-            }
-            spare.append(&mut self.undo_groups);
-            core::mem::swap(&mut self.undo_groups, spare);
-        }
-        self.undo_groups.push(SemUndoAssociation::Group(candidate));
-        Ok(())
+        self.undo_groups.register_prepared(group, spare)
     }
 
     fn compact_undo_registry(&mut self) {
-        self.undo_groups
-            .retain(|entry| entry.group().strong_count() != 0);
+        self.undo_groups.compact();
     }
 
-    /// Request/publish smaller storage without allocating under the manager
-    /// lock. Empty registries are moved into retired without installing spare.
-    /// The caller must drop both buffers after unlocking.
     pub(in crate::ipc::sem) fn shrink_undo_registry_prepared(
         &mut self,
-        spare: &mut Vec<SemUndoAssociation>,
-        retired: &mut Vec<SemUndoAssociation>,
+        spare: &mut SemUndoRegistry,
+        retired: &mut SemUndoRegistry,
     ) -> usize {
-        debug_assert!(spare.is_empty());
-        debug_assert!(retired.is_empty() && retired.capacity() == 0);
-        let len = self.undo_groups.len();
-        if len == 0 {
-            core::mem::swap(&mut self.undo_groups, retired);
-            return 0;
-        }
-        if self.undo_groups.capacity() <= 4 || len > self.undo_groups.capacity() / 4 {
-            return 0;
-        }
-        if spare.capacity() < len {
-            return len.saturating_mul(2).max(4);
-        }
-        if spare.capacity() < self.undo_groups.capacity() {
-            spare.append(&mut self.undo_groups);
-            core::mem::swap(&mut self.undo_groups, spare);
-        }
-        0
+        self.undo_groups.shrink_prepared(spare, retired)
     }
 
     pub(in crate::ipc::sem) fn try_allocate_sems(
@@ -173,7 +134,7 @@ impl KernelSemSet {
 
     pub(in crate::ipc::sem) fn new(kern_ipc_perm: IpcPerm, sems: Vec<KernelSem>) -> Self {
         KernelSemSet {
-            undo_groups: Vec::new(),
+            undo_groups: SemUndoRegistry::default(),
             kern_ipc_perm,
             sems,
             sem_otime: 0,
@@ -235,13 +196,11 @@ impl KernelSemSet {
         Ok(vals)
     }
     pub(in crate::ipc::sem) fn unregister_undo_group(&mut self, group: &Arc<SemUndoGroup>) {
-        let target = Arc::downgrade(group);
-        self.undo_groups
-            .retain(|entry| !entry.group().ptr_eq(&target));
+        self.undo_groups.unregister(group);
     }
     pub(in crate::ipc::sem) fn retire_undo_records(&mut self, id: SemId) {
         // Removed set owns all disposal until the caller releases the manager lock.
-        for association in &mut self.undo_groups {
+        for association in self.undo_groups.iter_mut() {
             if let Some(group) = association.group().upgrade() {
                 let record = group.take_record(id);
                 *association = SemUndoAssociation::Retired {

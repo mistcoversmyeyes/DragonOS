@@ -1,5 +1,6 @@
 use super::*;
 use crate::ipc::sem::set::test_support::test_perm;
+use crate::ipc::sem::set::SemUndoRegistry;
 use alloc::sync::Weak;
 
 impl SemManager {
@@ -11,11 +12,9 @@ impl SemManager {
         semid: SemId,
     ) -> Result<(), SystemError> {
         let set = self.get_by_semid_checked_mut(semid)?;
-        let mut spare = Vec::new();
+        let mut spare = SemUndoRegistry::default();
         if let Err(capacity) = set.ensure_undo_group_registered_prepared(group, &mut spare) {
-            spare
-                .try_reserve(capacity)
-                .map_err(|_| SystemError::ENOMEM)?;
+            spare.prepare(capacity)?;
             set.ensure_undo_group_registered_prepared(group, &mut spare)
                 .unwrap();
         }
