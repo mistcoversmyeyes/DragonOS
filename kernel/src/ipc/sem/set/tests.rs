@@ -396,7 +396,7 @@ fn queued_undo_commits_to_captured_group_not_waker_current_task() {
         Some(group_a.clone()),
         Some(group_a.prepare_record_for_test(semid, 1).unwrap()),
         waker,
-        SemopScratch::try_new(1).unwrap(),
+        SemopScratch::try_new(&[plain_sop(0, 0); 1]).unwrap(),
         SemBlockedOp {
             semnum: 0,
             wait_type: SemWaitType::Increase,

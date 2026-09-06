@@ -207,7 +207,7 @@ impl SemQueueEntry {
             None,
             None,
             waker,
-            SemopScratch::try_new(sops.len()).unwrap(),
+            SemopScratch::try_new(sops).unwrap(),
             blocker,
         )
     }

@@ -6,7 +6,7 @@ fn try_apply_commits_metadata_even_when_values_are_unchanged() {
     let semid = insert_test_set(&mut manager, SemKey::new(301), &[4]);
     let set = manager.get_by_semid_checked_mut(semid).unwrap();
     set.sem_otime = -1;
-    let mut scratch = SemopScratch::try_new(2).unwrap();
+    let mut scratch = SemopScratch::try_new(&[plain_sop(0, 0); 2]).unwrap();
     assert!(matches!(
         set.try_apply(
             &[plain_sop(0, -1), plain_sop(0, 1)],
@@ -28,7 +28,7 @@ fn try_apply_rebuilds_scratch_after_a_blocked_attempt() {
     let semid = insert_test_set(&mut manager, SemKey::new(302), &[0]);
     let set = manager.get_by_semid_checked_mut(semid).unwrap();
     set.sem_otime = -1;
-    let mut scratch = SemopScratch::try_new(1).unwrap();
+    let mut scratch = SemopScratch::try_new(&[plain_sop(0, 0); 1]).unwrap();
     assert!(matches!(
         set.try_apply(&[plain_sop(0, -1)], None, None, &mut scratch),
         Ok(SemAttempt::Blocked(_))
@@ -57,7 +57,7 @@ fn setval_clear_between_prepare_and_commit_refreshes_stale_existing_record() {
 
     let record = group.prepare_record_for_test(semid, 1).unwrap();
     manager.clear_undo_for_setval(semid, 0);
-    let mut scratch = SemopScratch::try_new(1).unwrap();
+    let mut scratch = SemopScratch::try_new(&[plain_sop(0, 0); 1]).unwrap();
     let set = manager.get_by_semid_checked_mut(semid).unwrap();
 
     let result = group.with_prepared_record_noalloc(record, |record| {
@@ -84,7 +84,7 @@ fn setall_clear_between_prepare_and_commit_refreshes_stale_existing_record() {
 
     let record = group.prepare_record_for_test(semid, 2).unwrap();
     manager.clear_undo_for_setall(semid);
-    let mut scratch = SemopScratch::try_new(1).unwrap();
+    let mut scratch = SemopScratch::try_new(&[plain_sop(0, 0); 1]).unwrap();
     let set = manager.get_by_semid_checked_mut(semid).unwrap();
 
     let result = group.with_prepared_record_noalloc(record, |record| {
@@ -112,7 +112,7 @@ fn stale_existing_prepared_record_refreshes_before_immediate_commit() {
 
     let record = group.prepare_record_for_test(semid, 1).unwrap();
     manager.clear_undo_for_setval(semid, 0);
-    let mut scratch = SemopScratch::try_new(1).unwrap();
+    let mut scratch = SemopScratch::try_new(&[plain_sop(0, 0); 1]).unwrap();
     let set = manager.get_by_semid_checked_mut(semid).unwrap();
 
     let result = group.with_prepared_record_noalloc(record, |record| {
@@ -137,7 +137,7 @@ fn consecutive_sem_undo_on_unchanged_existing_record_still_accumulates() {
     group.insert_test_record(semid, &[2]);
 
     let record = group.prepare_record_for_test(semid, 1).unwrap();
-    let mut scratch = SemopScratch::try_new(1).unwrap();
+    let mut scratch = SemopScratch::try_new(&[plain_sop(0, 0); 1]).unwrap();
     let set = manager.get_by_semid_checked_mut(semid).unwrap();
     group
         .with_prepared_record_noalloc(record, |record| {
@@ -159,7 +159,7 @@ fn ordered_mixed_undo_ops_apply_each_adjustment_step() {
     let semid = insert_test_set(&mut manager, SemKey::new(41), &[4]);
     let group = SemUndoGroup::new_for_test_bound_to(&INIT_IPC_NAMESPACE).unwrap();
     let record = group.prepare_record_for_test(semid, 1).unwrap();
-    let mut scratch = SemopScratch::try_new(3).unwrap();
+    let mut scratch = SemopScratch::try_new(&[plain_sop(0, 0); 3]).unwrap();
     let sops = [undo_sop(0, 3), plain_sop(0, -1), undo_sop(0, -2)];
 
     let set = manager.get_by_semid_checked_mut(semid).unwrap();
@@ -189,7 +189,7 @@ fn intermediate_adjustment_overflow_is_erange_even_if_later_op_cancels_it() {
     let group = SemUndoGroup::new_for_test_bound_to(&INIT_IPC_NAMESPACE).unwrap();
     group.insert_test_record(semid, &[i16::MAX]);
     let record = group.prepare_record_for_test(semid, 1).unwrap();
-    let mut scratch = SemopScratch::try_new(2).unwrap();
+    let mut scratch = SemopScratch::try_new(&[plain_sop(0, 0); 2]).unwrap();
     let sops = [undo_sop(0, -1), undo_sop(0, 1)];
 
     let set = manager.get_by_semid_checked_mut(semid).unwrap();
@@ -215,7 +215,7 @@ fn blocked_or_nowait_failure_does_not_commit_semval_or_semadj_prefix() {
     // Exercise the live record, not just an unpublished candidate.
     group.insert_test_record(semid, &[0]);
     let record = group.prepare_record_for_test(semid, 1).unwrap();
-    let mut scratch = SemopScratch::try_new(2).unwrap();
+    let mut scratch = SemopScratch::try_new(&[plain_sop(0, 0); 2]).unwrap();
     let sops = [undo_sop(0, -1), nowait_sop(0, -2)];
 
     let set = manager.get_by_semid_checked_mut(semid).unwrap();
@@ -243,7 +243,7 @@ fn zero_undo_op_can_prepare_zero_record_without_adjustment() {
     let semid = insert_test_set(&mut manager, SemKey::new(44), &[0]);
     let group = SemUndoGroup::new_for_test_bound_to(&INIT_IPC_NAMESPACE).unwrap();
     let record = group.prepare_record_for_test(semid, 1).unwrap();
-    let mut scratch = SemopScratch::try_new(1).unwrap();
+    let mut scratch = SemopScratch::try_new(&[plain_sop(0, 0); 1]).unwrap();
     let sops = [undo_sop(0, 0)];
 
     let set = manager.get_by_semid_checked_mut(semid).unwrap();
@@ -267,15 +267,15 @@ fn zero_undo_op_can_prepare_zero_record_without_adjustment() {
 }
 
 #[test]
-fn scratch_entry_for_returns_enomem_instead_of_extending_past_capacity() {
+fn scratch_rejects_an_incompatible_operation_array() {
     let mut manager = SemManager::new();
     let semid = insert_test_set(&mut manager, SemKey::new(45), &[1, 1]);
     let set = manager.get_by_semid_checked_mut(semid).unwrap();
-    let mut scratch = SemopScratch::try_new(1).unwrap();
+    let mut scratch = SemopScratch::try_new(&[plain_sop(0, 0); 1]).unwrap();
     let sops = [plain_sop(0, -1), plain_sop(1, -1)];
 
     assert!(matches!(
         KernelSemSet::simulate_semop(set, &sops, None, &mut scratch),
-        Err(SystemError::ENOMEM)
+        Err(SystemError::EINVAL)
     ));
 }

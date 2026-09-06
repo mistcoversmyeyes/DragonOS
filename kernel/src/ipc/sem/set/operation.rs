@@ -18,6 +18,7 @@ pub(in crate::ipc::sem) struct SemBlockedOp {
 #[derive(Debug)]
 struct SemopScratchEntry {
     semnum: usize,
+    initialized: bool,
     initial_val: i32,
     virtual_val: i32,
     initial_adj: i16,
@@ -27,50 +28,72 @@ struct SemopScratchEntry {
 #[derive(Debug)]
 pub(in crate::ipc::sem) struct SemopScratch {
     entries: Vec<SemopScratchEntry>,
+    op_slots: Vec<usize>,
 }
 
 impl SemopScratch {
-    pub(in crate::ipc::sem) fn try_new(capacity: usize) -> Result<Self, SystemError> {
+    /// Compile the immutable operation-to-slot mapping before locking the set.
+    /// Storage is proportional to nsops, never to the semaphore set size.
+    pub(in crate::ipc::sem) fn try_new(sops: &[PosixSemBuf]) -> Result<Self, SystemError> {
         let mut entries = Vec::new();
         entries
-            .try_reserve_exact(capacity)
+            .try_reserve_exact(sops.len())
             .map_err(|_| SystemError::ENOMEM)?;
-        Ok(Self { entries })
+        for op in sops {
+            entries.push(SemopScratchEntry {
+                semnum: op.sem_num as usize,
+                initialized: false,
+                initial_val: 0,
+                virtual_val: 0,
+                initial_adj: 0,
+                virtual_adj: 0,
+            });
+        }
+        entries.sort_unstable_by_key(|entry| entry.semnum);
+        entries.dedup_by_key(|entry| entry.semnum);
+        let mut op_slots = Vec::new();
+        op_slots
+            .try_reserve_exact(sops.len())
+            .map_err(|_| SystemError::ENOMEM)?;
+        for op in sops {
+            op_slots.push(
+                entries
+                    .binary_search_by_key(&(op.sem_num as usize), |entry| entry.semnum)
+                    .expect("each operation has a prepared scratch slot"),
+            );
+        }
+        Ok(Self { entries, op_slots })
     }
 
     fn clear(&mut self) {
-        self.entries.clear();
+        for entry in &mut self.entries {
+            entry.initialized = false;
+        }
     }
 
     fn entry_for(
         &mut self,
         set: &KernelSemSet,
+        op_index: usize,
         semnum: usize,
         undo: Option<&SemUndoRecord>,
     ) -> Result<&mut SemopScratchEntry, SystemError> {
-        if let Some(index) = self.entries.iter().position(|entry| entry.semnum == semnum) {
-            return Ok(&mut self.entries[index]);
+        let slot = *self.op_slots.get(op_index).ok_or(SystemError::EINVAL)?;
+        let entry = &mut self.entries[slot];
+        // A scratch belongs to this operation array, including on queued retries.
+        if entry.semnum != semnum {
+            return Err(SystemError::EINVAL);
         }
-
-        if self.entries.len() == self.entries.capacity() {
-            return Err(SystemError::ENOMEM);
+        if !entry.initialized {
+            entry.initial_val = set.sems[semnum].val;
+            entry.virtual_val = entry.initial_val;
+            entry.initial_adj = undo
+                .map(|record| record.adjustment(semnum))
+                .unwrap_or_default();
+            entry.virtual_adj = entry.initial_adj;
+            entry.initialized = true;
         }
-
-        let initial_val = set.sems[semnum].val;
-        let initial_adj = undo
-            .map(|record| record.adjustment(semnum))
-            .unwrap_or_default();
-        self.entries.push(SemopScratchEntry {
-            semnum,
-            initial_val,
-            virtual_val: initial_val,
-            initial_adj,
-            virtual_adj: initial_adj,
-        });
-        Ok(self
-            .entries
-            .last_mut()
-            .expect("SEM_UNDO scratch entry was just inserted"))
+        Ok(entry)
     }
 }
 
@@ -112,16 +135,19 @@ impl KernelSemSet {
         undo: Option<&mut SemUndoRecord>,
         scratch: &mut SemopScratch,
     ) -> Result<SemopOutcome, SystemError> {
+        if sops.len() != scratch.op_slots.len() {
+            return Err(SystemError::EINVAL);
+        }
         scratch.clear();
 
-        for op in sops {
+        for (op_index, op) in sops.iter().enumerate() {
             let idx = op.sem_num as usize;
             if idx >= set.sems.len() {
                 return Err(SystemError::EFBIG);
             }
 
             let has_undo = (op.sem_flg as u32) & SemFlags::SEM_UNDO.bits() != 0;
-            let entry = scratch.entry_for(set, idx, undo.as_deref())?;
+            let entry = scratch.entry_for(set, op_index, idx, undo.as_deref())?;
             let current = entry.virtual_val;
             if op.sem_op == 0 {
                 if current != 0 {

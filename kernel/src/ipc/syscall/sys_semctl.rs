@@ -88,6 +88,7 @@ pub(super) fn do_kernel_semctl(
                 guard.ipc_rmid(semid, &mut wakes)?
             };
             wakes.wake_all();
+            removed.reclaim_removed_undo_storage();
             drop(removed);
             Ok(0)
         }

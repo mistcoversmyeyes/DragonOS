@@ -110,7 +110,18 @@ impl SemManager {
         } else {
             None
         };
-        let mut immediate_scratch = SemopScratch::try_new(sops.len())?;
+        // A cancelled first-use reservation can outlive the last RMID shrink.
+        // Declare cleanup before entries/guards so their reservations are gone
+        // before any allocation or buffer disposal performed by reclamation.
+        let prepared_missing = core::cell::Cell::new(false);
+        defer::defer!({
+            if prepared_missing.get() {
+                if let Some(group) = undo_group.as_ref() {
+                    group.shrink_records();
+                }
+            }
+        });
+        let mut immediate_scratch = SemopScratch::try_new(sops)?;
         let plain_prepared_entry = if has_undo {
             None
         } else {
@@ -121,7 +132,7 @@ impl SemManager {
                     None,
                     None,
                     waker.clone(),
-                    SemopScratch::try_new(sops.len())?,
+                    SemopScratch::try_new(sops)?,
                     SemBlockedOp {
                         semnum: 0,
                         wait_type: SemWaitType::Zero,
@@ -164,13 +175,14 @@ impl SemManager {
 
             let prepared_undo = if let Some(group) = undo_group.as_ref() {
                 let record = group.prepare_record(semid, nsems)?;
+                prepared_missing.set(prepared_missing.get() || !record.was_existing());
                 let entry = Arc::try_new(SemQueueEntry::new_prepared(
                     SemQueueEntry::prepare_sops(sops)?,
                     pid.clone(),
                     Some(group.clone()),
                     Some(record),
                     waker.clone(),
-                    SemopScratch::try_new(sops.len())?,
+                    SemopScratch::try_new(sops)?,
                     SemBlockedOp {
                         semnum: 0,
                         wait_type: SemWaitType::Zero,

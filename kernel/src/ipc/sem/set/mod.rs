@@ -79,6 +79,15 @@ pub struct KernelSemSet {
 }
 
 impl KernelSemSet {
+    /// Only call after RMID released the manager lock and delivered wakeups.
+    pub(crate) fn reclaim_removed_undo_storage(&self) {
+        for association in &self.undo_groups {
+            if let SemUndoAssociation::Retired { _group: group, .. } = association {
+                group.shrink_records();
+            }
+        }
+    }
+
     /// Live associations survive SETVAL/SETALL. Only RMID or dead groups
     /// remove them, so an existing undo record proves prior association.
     /// Insufficient spare capacity requests an unlocked preparation/retry.

@@ -2890,6 +2890,113 @@ TEST(SysVSem, UndoGroupChurnAcrossPersistentSets) {
     }
 }
 
+TEST(SysVSem, MaximumOperationArrayPreservesOrderAndRollback) {
+    SemSet sem(500, IPC_CREAT | 0600);
+    ASSERT_TRUE(sem.valid());
+    std::vector<sembuf> ops;
+    // Reverse order deliberately differs from the prepared scratch slot order.
+    for (int i = 499; i >= 0; --i) ops.push_back({static_cast<unsigned short>(i), 1, 0});
+    ASSERT_EQ(0, SemOp(sem.id(), ops.data(), ops.size()));
+    std::vector<unsigned short> values(500);
+    ASSERT_EQ(0, SemCtl(sem.id(), 0, GETALL, reinterpret_cast<unsigned long>(values.data())));
+    EXPECT_TRUE(std::all_of(values.begin(), values.end(), [](auto v) { return v == 1; }));
+    for (auto& op : ops) op.sem_op = -1;
+    // Last operation fails after 499 virtual decrements: none may commit.
+    ops.back().sem_op = -2;
+    ops.back().sem_flg = IPC_NOWAIT;
+    errno = 0;
+    EXPECT_EQ(-1, SemOp(sem.id(), ops.data(), ops.size()));
+    EXPECT_EQ(EAGAIN, errno);
+    ASSERT_EQ(0, SemCtl(sem.id(), 0, GETALL, reinterpret_cast<unsigned long>(values.data())));
+    EXPECT_TRUE(std::all_of(values.begin(), values.end(), [](auto v) { return v == 1; }));
+    ops.clear();
+    // Duplicate slots must observe preceding virtual values, not initial values.
+    for (int i = 249; i >= 0; --i) {
+        ops.push_back({static_cast<unsigned short>(i), -1, SEM_UNDO});
+        ops.push_back({static_cast<unsigned short>(i), 1, SEM_UNDO});
+    }
+    ASSERT_EQ(0, SemOp(sem.id(), ops.data(), ops.size()));
+    ASSERT_EQ(0, SemCtl(sem.id(), 0, GETALL, reinterpret_cast<unsigned long>(values.data())));
+    EXPECT_TRUE(std::all_of(values.begin(), values.end(), [](auto v) { return v == 1; }));
+}
+
+TEST(SysVSem, MaximumOperationArrayRetryRefreshesEverySlot) {
+    SemSet sem(500, IPC_CREAT | 0600);
+    ASSERT_TRUE(sem.valid());
+    std::vector<unsigned short> values(500, 1);
+    values[0] = 0;
+    ASSERT_EQ(0, SemCtl(sem.id(), 0, SETALL, reinterpret_cast<unsigned long>(values.data())));
+    pid_t pid = fork();
+    ASSERT_GE(pid, 0);
+    if (pid == 0) {
+        std::vector<sembuf> ops;
+        for (int i = 499; i >= 0; --i) ops.push_back({static_cast<unsigned short>(i), -1, SEM_UNDO});
+        const timespec timeout = {5, 0};
+        _exit(SemTimedOp(sem.id(), ops.data(), ops.size(), &timeout) == 0 ? 0 : 180);
+    }
+    ChildGuard child(pid);
+    ASSERT_TRUE(WaitForNcnt(sem.id(), 0, 1));
+    // Force a retry with a different blocker after almost the whole first pass.
+    ASSERT_EQ(0, SemCtl(sem.id(), 499, SETVAL, 0));
+    ASSERT_TRUE(WaitForNcnt(sem.id(), 499, 1));
+    values.assign(500, 2);
+    ASSERT_EQ(0, SemCtl(sem.id(), 0, SETALL, reinterpret_cast<unsigned long>(values.data())));
+    WaitChildOk(&child);
+    ASSERT_EQ(0, SemCtl(sem.id(), 0, GETALL, reinterpret_cast<unsigned long>(values.data())));
+    // Final-owner undo restores each successful decrement.
+    EXPECT_TRUE(std::all_of(values.begin(), values.end(), [](auto v) { return v == 2; }));
+}
+
+TEST(SysVSem, PersistentUndoGroupSurvivesRemovalAndRecordRegrowth) {
+    constexpr int kSets = 128;
+    std::vector<std::unique_ptr<SemSet>> sets;
+    for (int i = 0; i < kSets; ++i) {
+        sets.emplace_back(new SemSet(1, IPC_CREAT | 0600));
+        ASSERT_TRUE(sets.back()->valid());
+    }
+    int ready[2], resume[2];
+    ASSERT_EQ(0, pipe(ready));
+    FdGuard ready_read(ready[0]), ready_write(ready[1]);
+    ASSERT_EQ(0, pipe(resume));
+    FdGuard resume_read(resume[0]), resume_write(resume[1]);
+    pid_t pid = fork();
+    ASSERT_GE(pid, 0);
+    if (pid == 0) {
+        ready_read.Close();
+        resume_write.Close();
+        for (auto& sem : sets) if (!SemUndoOpMustSucceed(sem->id(), 0, 1)) _exit(181);
+        char token = 1;
+        if (!WriteExact(ready_write.get(), &token, 1) ||
+            !ReadExact(resume_read.get(), &token, 1)) _exit(182);
+        // The same owner remains alive while most old records are removed.
+        if (!SemUndoOpMustSucceed(sets.back()->id(), 0, 1)) _exit(183);
+        {
+            std::vector<std::unique_ptr<SemSet>> fresh_sets;
+            for (int i = 0; i < kSets; ++i) {
+                fresh_sets.emplace_back(new SemSet(1, IPC_CREAT | 0600));
+                if (!fresh_sets.back()->valid() ||
+                    !SemUndoOpMustSucceed(fresh_sets.back()->id(), 0, 1)) _exit(184);
+            }
+            // Keep all new records live together to force growth after shrink,
+            // then remove them before final-owner replay of the survivor.
+        }
+        _exit(0);
+    }
+    ChildGuard child(pid);
+    ready_write.Close();
+    resume_read.Close();
+    char token;
+    ASSERT_TRUE(ReadExact(ready_read.get(), &token, 1));
+    for (int i = 0; i < kSets - 1; ++i) {
+        ASSERT_EQ(0, SemCtl(sets[i]->id(), 0, IPC_RMID, 0));
+        sets[i]->release();
+    }
+    ASSERT_EQ(1, SemCtl(sets.back()->id(), 0, GETVAL, 0));
+    ASSERT_TRUE(WriteExact(resume_write.get(), &token, 1));
+    WaitChildOk(&child);
+    EXPECT_EQ(0, SemCtl(sets.back()->id(), 0, GETVAL, 0));
+}
+
 TEST(SysVSem, ConcurrentWorkers) {
     constexpr int kWorkers = 8;
     SemSet sem(1, IPC_CREAT | 0600);

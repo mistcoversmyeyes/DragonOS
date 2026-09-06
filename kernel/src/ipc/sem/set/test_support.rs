@@ -70,7 +70,7 @@ pub(in crate::ipc::sem) fn enqueue_undo_waiter_for_test(
         Some(Arc::clone(group)),
         Some(group.prepare_record_for_test(semid, 1).unwrap()),
         waker,
-        SemopScratch::try_new(1).unwrap(),
+        SemopScratch::try_new(&[plain_sop(0, 0); 1]).unwrap(),
         SemBlockedOp {
             semnum: 0,
             wait_type: SemWaitType::Increase,

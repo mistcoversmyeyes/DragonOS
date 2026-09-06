@@ -331,6 +331,53 @@ impl SemUndoGroup {
             .position(|record| record.semid == semid)?;
         Some(state.records.swap_remove(index))
     }
+
+    /// Best-effort reclamation. Caller must hold neither manager nor group lock.
+    /// Preparation and old-buffer disposal stay outside both critical sections.
+    pub(crate) fn shrink_records(&self) {
+        let mut spare = Vec::new();
+        let mut retired = Vec::new();
+        let needed = {
+            let mut state = self.inner.lock_irqsave();
+            state.shrink_records_prepared(&mut spare, &mut retired)
+        };
+        if needed == 0 || spare.try_reserve_exact(needed).is_err() {
+            return;
+        }
+        let mut state = self.inner.lock_irqsave();
+        state.shrink_records_prepared(&mut spare, &mut retired);
+    }
+}
+
+impl SemUndoGroupState {
+    /// Pending Missing tokens own capacity even when no live records remain.
+    /// Recheck after unlocked allocation: another prepare may need more slots.
+    fn shrink_records_prepared(
+        &mut self,
+        spare: &mut Vec<SemUndoRecord>,
+        retired: &mut Vec<SemUndoRecord>,
+    ) -> usize {
+        debug_assert!(spare.is_empty());
+        debug_assert!(retired.is_empty() && retired.capacity() == 0);
+        let Some(required) = self.records.len().checked_add(self.reserved_records) else {
+            return 0;
+        };
+        if required == 0 {
+            core::mem::swap(&mut self.records, retired);
+            return 0;
+        }
+        if self.records.capacity() <= 4 || required > self.records.capacity() / 4 {
+            return 0;
+        }
+        if spare.capacity() < required {
+            return required.saturating_mul(2).max(4);
+        }
+        if spare.capacity() < self.records.capacity() {
+            spare.append(&mut self.records);
+            core::mem::swap(&mut self.records, spare);
+        }
+        0
+    }
 }
 
 #[cfg(test)]
