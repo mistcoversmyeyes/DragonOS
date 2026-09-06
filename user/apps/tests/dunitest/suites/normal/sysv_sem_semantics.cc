@@ -1941,6 +1941,172 @@ TEST(SysVSem, BlockingWakeupZero) {
     WaitChildOk(child);
 }
 
+bool WaitForPipeEof(int fd) {
+    char token;
+    ssize_t result;
+    do { result = read(fd, &token, 1); } while (result < 0 && errno == EINTR);
+    return result == 0;
+}
+
+TEST(SysVSem, WaitCountsTrackBlockerMigrationAndTerminalRemoval) {
+    // Success, signal cancellation, a later NOWAIT failure, and same-slot
+    // zero/increase migration (which cannot complete and is cancelled).
+    for (int mode = 0; mode < 4; ++mode) {
+        SemSet sem(3, IPC_CREAT | 0600);
+        ASSERT_TRUE(sem.valid());
+        ASSERT_EQ(0, SemCtl(sem.id(), 0, SETVAL, 1));
+        const int increase_slot = mode == 3 ? 0 : 1;
+        pid_t pid = fork();
+        ASSERT_GE(pid, 0);
+        if (pid == 0) {
+            struct sigaction action = {};
+            action.sa_handler = [](int) {};
+            sigemptyset(&action.sa_mask);
+            if (sigaction(SIGUSR1, &action, nullptr) != 0) _exit(140);
+            struct sembuf ops[] = {{0, 0, 0},
+                {static_cast<unsigned short>(increase_slot), -1, 0},
+                {2, -1, IPC_NOWAIT}};
+            int result = SemOp(sem.id(), ops, mode == 2 ? 3 : 2);
+            const int expected_errno = mode == 2 ? EAGAIN : EINTR;
+            _exit((mode == 0 ? result == 0 : result == -1 && errno == expected_errno) ? 0 : 141);
+        }
+        ChildGuard child(pid);
+        ASSERT_TRUE(WaitForZcnt(sem.id(), 0, 1));
+        for (int pass = 0; pass < 2; ++pass) {
+            ASSERT_EQ(0, SemCtl(sem.id(), 0, SETVAL, 0));
+            ASSERT_TRUE(WaitForNcnt(sem.id(), increase_slot, 1));
+            EXPECT_EQ(0, SemCtl(sem.id(), 0, GETZCNT, 0));
+            EXPECT_EQ(0, SemCtl(sem.id(), 2, GETNCNT, 0));
+            if (pass == 0) {
+                ASSERT_EQ(0, SemCtl(sem.id(), 0, SETVAL, 1));
+                ASSERT_TRUE(WaitForZcnt(sem.id(), 0, 1));
+                EXPECT_EQ(0, SemCtl(sem.id(), increase_slot, GETNCNT, 0));
+            }
+        }
+        if (mode == 1 || mode == 3) {
+            ASSERT_EQ(0, kill(pid, SIGUSR1));
+        } else {
+            ASSERT_EQ(0, SemCtl(sem.id(), 1, SETVAL, 1));
+        }
+        WaitChildOk(&child);
+        for (int slot = 0; slot < 3; ++slot) {
+            EXPECT_EQ(0, SemCtl(sem.id(), slot, GETNCNT, 0));
+            EXPECT_EQ(0, SemCtl(sem.id(), slot, GETZCNT, 0));
+        }
+        EXPECT_EQ(mode == 2 ? 1 : 0, SemCtl(sem.id(), 1, GETVAL, 0))
+            << "later NOWAIT failure must not commit the earlier decrement";
+    }
+}
+
+TEST(SysVSem, FailedOnlyUndoUpdatesTimeOnExit) {
+    for (bool timed : {false, true}) {
+        SemSet sem(1, IPC_CREAT | 0600);
+        ASSERT_TRUE(sem.valid());
+        struct semid_ds before = {};
+        ASSERT_EQ(0, SemCtl(sem.id(), 0, IPC_STAT, reinterpret_cast<unsigned long>(&before)));
+        ASSERT_EQ(0, before.sem_otime);
+        const int original_pid = SemCtl(sem.id(), 0, GETPID, 0);
+        ASSERT_GE(original_pid, 0);
+        int ready[2], release[2];
+        ASSERT_EQ(0, pipe(ready));
+        FdGuard ready_read(ready[0]), ready_write(ready[1]);
+        ASSERT_EQ(0, pipe(release));
+        FdGuard release_read(release[0]), release_write(release[1]);
+        pid_t pid = fork();
+        ASSERT_GE(pid, 0);
+        if (pid == 0) {
+            ready_read.Close();
+            release_write.Close();
+            struct sembuf op = {0, -1, static_cast<short>(SEM_UNDO | (timed ? 0 : IPC_NOWAIT))};
+            struct timespec zero = {};
+            int result = timed ? SemTimedOp(sem.id(), &op, 1, &zero) : SemOp(sem.id(), &op, 1);
+            if (result != -1 || errno != EAGAIN) _exit(142);
+            const char token = 1;
+            _exit(WriteExact(ready_write.get(), &token, 1) && WaitForPipeEof(release_read.get())
+                      ? 0 : 143);
+        }
+        ChildGuard child(pid);
+        ready_write.Close();
+        release_read.Close();
+        char token;
+        ASSERT_TRUE(ReadExact(ready_read.get(), &token, 1));
+        struct semid_ds failed = {};
+        ASSERT_EQ(0, SemCtl(sem.id(), 0, IPC_STAT, reinterpret_cast<unsigned long>(&failed)));
+        EXPECT_EQ(0, failed.sem_otime);
+        EXPECT_EQ(original_pid, SemCtl(sem.id(), 0, GETPID, 0));
+        EXPECT_EQ(0, SemCtl(sem.id(), 0, GETVAL, 0));
+        release_write.Close();
+        WaitChildOk(&child);
+        struct semid_ds exited = {};
+        ASSERT_EQ(0, SemCtl(sem.id(), 0, IPC_STAT, reinterpret_cast<unsigned long>(&exited)));
+        EXPECT_NE(0, exited.sem_otime) << "exit replays even a zero-adjustment undo record";
+        EXPECT_EQ(original_pid, SemCtl(sem.id(), 0, GETPID, 0));
+        EXPECT_EQ(0, SemCtl(sem.id(), 0, GETVAL, 0));
+    }
+}
+
+struct QueuedSharedUndoArgs {
+    int semid;
+    int ready_read;
+    int ready_write;
+    int release_read;
+    int release_write;
+};
+
+int QueuedSharedUndoChild(void* opaque) {
+    const auto& args = *static_cast<QueuedSharedUndoArgs*>(opaque);
+    close(args.ready_read);
+    close(args.release_write);
+    if (!SemUndoOpMustSucceed(args.semid, 0, -1)) return 144;
+    const char token = 1;
+    return WriteExact(args.ready_write, &token, 1) && WaitForPipeEof(args.release_read) ? 0 : 145;
+}
+
+int RunSharedUndoFailureSupervisor(int semid, int cmd) {
+    int ready[2], release[2];
+    if (pipe(ready) != 0) return 146;
+    FdGuard ready_read(ready[0]), ready_write(ready[1]);
+    if (pipe(release) != 0) return 147;
+    FdGuard release_read(release[0]), release_write(release[1]);
+    alignas(16) char stack[16384];
+    QueuedSharedUndoArgs args = {semid, ready[0], ready[1], release[0], release[1]};
+    pid_t pid = clone(QueuedSharedUndoChild, stack + sizeof(stack), CLONE_SYSVSEM | SIGCHLD, &args);
+    if (pid < 0) return 148;
+    ChildGuard child(pid);
+    ready_write.Close();
+    release_read.Close();
+    if (!WaitForNcnt(semid, 0, 1)) return 149;
+    struct sembuf fail = {0, -1, SEM_UNDO | IPC_NOWAIT};
+    if (SemOp(semid, &fail, 1) != -1 || errno != EAGAIN) return 150;
+    if (SemCtl(semid, 0, SETVAL, 1) != 0) return 151;
+    char token;
+    if (!ReadExact(ready_read.get(), &token, 1) || SemCtl(semid, 0, GETVAL, 0) != 0) return 152;
+    unsigned short value = 7;
+    if (SemCtl(semid, 0, cmd, cmd == SETALL ? reinterpret_cast<unsigned long>(&value) : 7) != 0)
+        return 153;
+    release_write.Close();
+    int status;
+    pid_t ret;
+    do { ret = waitpid(pid, &status, 0); } while (ret < 0 && errno == EINTR);
+    if (ret != pid) return 154;
+    child.MarkReaped();
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : 155;
+}
+
+TEST(SysVSem, SharedUndoFailurePreservesQueuedAssociation) {
+    for (int cmd : {SETVAL, SETALL}) {
+        SemSet sem(1, IPC_CREAT | 0600);
+        ASSERT_TRUE(sem.valid());
+        pid_t pid = fork();
+        ASSERT_GE(pid, 0);
+        if (pid == 0) _exit(RunSharedUndoFailureSupervisor(sem.id(), cmd));
+        ChildGuard supervisor(pid);
+        WaitChildOk(&supervisor);
+        EXPECT_EQ(7, SemCtl(sem.id(), 0, GETVAL, 0));
+        EXPECT_EQ(0, SemCtl(sem.id(), 0, GETNCNT, 0));
+    }
+}
+
 TEST(SysVSem, GetNcntCountsBlocked) {
     SemSet sem(1, IPC_CREAT | 0600);
     ASSERT_TRUE(sem.valid());

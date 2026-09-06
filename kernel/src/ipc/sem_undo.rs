@@ -381,7 +381,9 @@ impl SemUndoGroup {
 
     /// Borrow the current record under the group lock, never a stale snapshot.
     /// The callback must simulate without writes and mutate only on Publish;
-    /// Keep (including errors/blocked operations) must leave the record unchanged.
+    /// Keep (including errors/blocked operations) must leave the debt unchanged.
+    /// First use publishes a zero record before calling the simulation, as in
+    /// Linux find_alloc_undo; Keep retains only a lightweight existing token.
     /// SemopScratch provides that separation without an additional transaction.
     pub(crate) fn with_prepared_record_noalloc<R>(
         &self,
@@ -420,25 +422,25 @@ impl SemUndoGroup {
             };
         }
 
-        // Existing tokens cannot recreate a record removed by RMID. Missing
-        // candidates stay zero until a successful, locally simulated commit.
-        let candidate = record.candidate.as_mut().ok_or(SystemError::EINVAL)?;
+        // Like Linux find_alloc_undo, publish a zero record before simulating:
+        // even a blocked/failed operation retains this group/set association.
+        // Existing tokens cannot recreate a record removed by RMID.
+        if record.candidate.is_none() {
+            return Err(SystemError::EINVAL);
+        }
         if state.records.len() >= state.records.capacity() {
             return Err(SystemError::ENOMEM);
         }
-
-        match f(candidate) {
-            PreparedSemUndoRecordAction::Publish(result) => {
-                if let Some(mut reservation) = record.reservation.take() {
-                    state.reserved_records = state
-                        .reserved_records
-                        .checked_sub(1)
-                        .expect("SEM_UNDO record reservation count underflow");
-                    reservation.disarm();
-                }
-                state.records.push(record.candidate.take().unwrap());
-                Ok((result, None))
-            }
+        if let Some(mut reservation) = record.reservation.take() {
+            state.reserved_records = state
+                .reserved_records
+                .checked_sub(1)
+                .expect("SEM_UNDO record reservation count underflow");
+            reservation.disarm();
+        }
+        state.records.push(record.candidate.take().unwrap());
+        match f(state.records.last_mut().unwrap()) {
+            PreparedSemUndoRecordAction::Publish(result) => Ok((result, None)),
             PreparedSemUndoRecordAction::Keep(result) => Ok((result, Some(record))),
         }
     }
@@ -1005,6 +1007,30 @@ mod tests {
         assert_eq!(group.commit_record(record), Err(SystemError::ENOMEM));
         assert_eq!(group.record_count_for_test(), 0);
         assert_eq!(group.record_capacity_for_test(), before_capacity);
+    }
+
+    #[test]
+    fn failed_first_operation_keeps_zero_record_without_another_reservation() {
+        let group = SemUndoGroup::new_for_test();
+        let semid = SemId::new(214);
+        let prepared = group.prepare_record_for_test(semid, 2).unwrap();
+        assert_eq!(group.record_count_for_test(), 0); // Preparation alone is not publication.
+        let (result, token) = group
+            .with_prepared_record_noalloc(prepared, |record| {
+                assert_eq!(record.adjustment(0), 0);
+                PreparedSemUndoRecordAction::Keep(Err::<(), _>(SystemError::EAGAIN_OR_EWOULDBLOCK))
+            })
+            .unwrap();
+        assert_eq!(result, Err(SystemError::EAGAIN_OR_EWOULDBLOCK));
+        assert!(token.unwrap().was_existing());
+        assert_eq!(group.record_count_for_test(), 1);
+        assert_eq!(group.pending_record_reservations_for_test(), 0);
+        assert_eq!(group.adjustment_for_test(semid, 0), 0);
+        assert_eq!(group.adjustment_for_test(semid, 1), 0);
+        assert!(group
+            .prepare_record_for_test(semid, 2)
+            .unwrap()
+            .was_existing());
     }
 
     #[test]

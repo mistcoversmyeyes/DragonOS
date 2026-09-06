@@ -7,7 +7,7 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-use core::{cell::Cell, fmt};
+use core::fmt;
 
 use hashbrown::HashMap;
 use system_error::SystemError;
@@ -166,6 +166,9 @@ pub struct KernelSem {
     val: i32,
     /// sempid: process that last operated on this semaphore
     pid: Option<Arc<Pid>>,
+    /// Counts of queued operations currently blocked on this semaphore.
+    ncnt: usize,
+    zcnt: usize,
 }
 
 /// Userspace `sembuf` (Linux `struct sembuf`, 6 bytes)
@@ -468,16 +471,6 @@ impl SemQueueEntry {
         }
     }
 
-    fn update_blocker(&self, blocker: SemBlockedOp) {
-        let mut status = self.status.lock();
-        if let SemQueueStatus::Queued {
-            blocker: current, ..
-        } = &mut *status
-        {
-            *current = blocker;
-        }
-    }
-
     fn complete(&self, result: Result<usize, SystemError>) -> bool {
         let mut status = self.status.lock();
         if matches!(&*status, SemQueueStatus::Completed { .. }) {
@@ -494,6 +487,7 @@ impl SemQueueEntry {
         true
     }
 
+    #[cfg(test)]
     fn is_waiting_on(&self, semnum: usize, wait_type: SemWaitType) -> bool {
         matches!(
             &*self.status.lock(),
@@ -663,7 +657,15 @@ impl KernelSemSet {
         let mut sems = Vec::new();
         sems.try_reserve_exact(nsems)
             .map_err(|_| SystemError::ENOMEM)?;
-        sems.resize(nsems, KernelSem { val: 0, pid: None });
+        sems.resize(
+            nsems,
+            KernelSem {
+                val: 0,
+                pid: None,
+                ncnt: 0,
+                zcnt: 0,
+            },
+        );
         Ok(sems)
     }
 
@@ -689,11 +691,53 @@ impl KernelSemSet {
 
     /// The prepared entry itself owns the queue links; publication cannot allocate.
     fn enqueue_waiter(&mut self, waiter: Arc<SemQueueEntry>) {
+        let blocker = match &*waiter.status.lock() {
+            SemQueueStatus::Queued {
+                blocker,
+                links: None,
+            } => *blocker,
+            _ => panic!("enqueue requires an unlinked semaphore operation"),
+        };
         let queue = match Self::pending_queue_for(&waiter.sops) {
             SemPendingQueue::Const => &mut self.pending_const,
             SemPendingQueue::Alter => &mut self.pending_alter,
         };
         queue.push_back(waiter);
+        self.change_wait_count(blocker, true);
+    }
+
+    fn change_wait_count(&mut self, blocker: SemBlockedOp, increase: bool) {
+        let sem = &mut self.sems[blocker.semnum];
+        let count = match blocker.wait_type {
+            SemWaitType::Increase => &mut sem.ncnt,
+            SemWaitType::Zero => &mut sem.zcnt,
+        };
+        *count = if increase {
+            count.checked_add(1).expect("semaphore wait count overflow")
+        } else {
+            count
+                .checked_sub(1)
+                .expect("semaphore wait count underflow")
+        };
+    }
+
+    /// Only linked entries contribute to counts; preparation uses this same
+    /// operation without accounting. Manager lock serializes both kinds.
+    fn update_blocker(&mut self, entry: &SemQueueEntry, blocker: SemBlockedOp) {
+        let mut status = entry.status.lock();
+        if let SemQueueStatus::Queued {
+            blocker: old,
+            links,
+        } = &mut *status
+        {
+            if links.is_some()
+                && (old.semnum != blocker.semnum || old.wait_type != blocker.wait_type)
+            {
+                self.change_wait_count(*old, false);
+                self.change_wait_count(blocker, true);
+            }
+            *old = blocker;
+        }
     }
 
     fn remove_waiter(&mut self, target: &Arc<SemQueueEntry>) {
@@ -713,38 +757,41 @@ impl KernelSemSet {
     }
 
     fn remove_pending(&mut self, queue: SemPendingQueue, entry: &Arc<SemQueueEntry>) {
-        match queue {
+        let blocker = match &*entry.status.lock() {
+            SemQueueStatus::Queued {
+                blocker,
+                links: Some(_),
+                ..
+            } => *blocker,
+            _ => return,
+        };
+        let removed = match queue {
             SemPendingQueue::Const => self.pending_const.remove(entry),
             SemPendingQueue::Alter => self.pending_alter.remove(entry),
         };
+        if removed {
+            self.change_wait_count(blocker, false);
+        }
     }
 
     /// Publish removal under the manager lock; the caller wakes after unlocking.
     fn complete_all_removed(&mut self, wakes: &mut SemWakeBatch) {
         for entry in self.pending_const.iter() {
-            self.pending_const.remove(&entry);
+            self.remove_pending(SemPendingQueue::Const, &entry);
             wakes.complete(entry, Err(SystemError::EIDRM));
         }
         for entry in self.pending_alter.iter() {
-            self.pending_alter.remove(&entry);
+            self.remove_pending(SemPendingQueue::Alter, &entry);
             wakes.complete(entry, Err(SystemError::EIDRM));
         }
     }
 
     fn ncnt(&self, semnum: usize) -> usize {
-        self.pending_const
-            .iter()
-            .chain(self.pending_alter.iter())
-            .filter(|entry| entry.is_waiting_on(semnum, SemWaitType::Increase))
-            .count()
+        self.sems[semnum].ncnt
     }
 
     fn zcnt(&self, semnum: usize) -> usize {
-        self.pending_const
-            .iter()
-            .chain(self.pending_alter.iter())
-            .filter(|entry| entry.is_waiting_on(semnum, SemWaitType::Zero))
-            .count()
+        self.sems[semnum].zcnt
     }
 }
 
@@ -956,37 +1003,6 @@ impl SemManager {
         if let Ok(set) = manager.get_by_semid_checked_mut(semid) {
             set.shrink_undo_registry_prepared(&mut spare, &mut retired);
         }
-    }
-
-    fn release_unused_undo_group(
-        ipcns: &Arc<IpcNamespace>,
-        semid: SemId,
-        group: &Arc<SemUndoGroup>,
-    ) {
-        {
-            let mut manager = ipcns.sem.lock();
-            let Ok(set) = manager.get_by_semid_checked(semid) else {
-                return;
-            };
-            if group.with_record_mut(semid, |_| ()).is_some()
-                || set
-                    .pending_const
-                    .iter()
-                    .chain(set.pending_alter.iter())
-                    .any(|entry| {
-                        entry
-                            .undo_group
-                            .as_ref()
-                            .is_some_and(|owner| Arc::ptr_eq(owner, group))
-                    })
-            {
-                return;
-            }
-            // Other Missing preparations outside the lock re-register before
-            // publication. Existing records (even zero debt) keep their link.
-            manager.unregister_undo_group(semid, group);
-        }
-        Self::shrink_undo_registry(ipcns, semid);
     }
 
     pub(crate) fn clear_undo_for_setval(&mut self, semid: SemId, semnum: usize) {
@@ -1435,7 +1451,7 @@ impl SemManager {
                     wakes.complete(entry.clone(), Err(SystemError::EAGAIN_OR_EWOULDBLOCK));
                 }
                 Ok(SemopOutcome::Blocked(blocker)) => {
-                    entry.update_blocker(blocker);
+                    set.update_blocker(&entry, blocker);
                 }
                 Err(error) => {
                     set.remove_pending(queue, &entry);
@@ -1478,7 +1494,7 @@ impl SemManager {
                 if blocker.nowait {
                     Err(SystemError::EAGAIN_OR_EWOULDBLOCK)
                 } else {
-                    entry.update_blocker(blocker);
+                    set.update_blocker(entry, blocker);
                     Ok(None)
                 }
             }
@@ -1605,16 +1621,6 @@ impl SemManager {
         } else {
             None
         };
-        let registered_missing = Cell::new(false);
-        // Declare before all entries and manager guards. Failed/timeout-only
-        // operations have no published record for final-owner exit to enumerate.
-        defer::defer!({
-            if registered_missing.get() {
-                if let Some(group) = undo_group.as_ref() {
-                    Self::release_unused_undo_group(ipcns, semid, group);
-                }
-            }
-        });
         let mut immediate_scratch = SemopScratch::try_new(sops.len())?;
         let plain_prepared_entry = if has_undo {
             None
@@ -1693,15 +1699,18 @@ impl SemManager {
                 continue;
             }
             if let Some(prepared_entry) = prepared_undo {
-                // Only a published record can take the fast path. Missing
-                // (including queued) records must be linked before publication.
+                let mut record_slot = prepared_entry.undo_record.lock_irqsave();
+                let prepared_record = record_slot
+                    .take()
+                    .expect("prepared SEM_UNDO entry owns its record");
+                if prepared_record.adjustment_count() != nsems {
+                    return Err(SystemError::EINVAL);
+                }
+                // First-use candidates must be associated before zero-record
+                // publication. Queued operations retain Existing tokens only.
                 // Full semid was rechecked above, so Existing cannot refer to a
                 // destroyed/reused set. SETVAL/SETALL retain live associations.
-                let already_associated = prepared_entry
-                    .undo_record
-                    .lock_irqsave()
-                    .as_ref()
-                    .is_some_and(PreparedSemUndoRecord::was_existing);
+                let already_associated = prepared_record.was_existing();
                 if !already_associated {
                     let set = guard.get_by_semid_checked_mut(semid)?;
                     if let Err(capacity) = set.ensure_undo_group_registered_prepared(
@@ -1713,15 +1722,6 @@ impl SemManager {
                         registry_capacity_needed = capacity;
                         continue;
                     }
-                    registered_missing.set(true);
-                }
-                let mut record_slot = prepared_entry.undo_record.lock_irqsave();
-                let prepared_record = record_slot
-                    .take()
-                    .expect("prepared SEM_UNDO entry owns its record");
-                if prepared_record.adjustment_count() != nsems {
-                    *record_slot = Some(prepared_record);
-                    continue;
                 }
                 let set = guard.get_by_semid_checked_mut(semid)?;
                 let (outcome, kept_record) = undo_group
@@ -1762,7 +1762,7 @@ impl SemManager {
                             return Err(SystemError::EAGAIN_OR_EWOULDBLOCK);
                         }
                         drop(record_slot);
-                        prepared_entry.update_blocker(blocker);
+                        set.update_blocker(&prepared_entry, blocker);
                         set.enqueue_waiter(prepared_entry.clone());
                         break prepared_entry;
                     }
@@ -1785,7 +1785,7 @@ impl SemManager {
                         let prepared_entry = plain_prepared_entry
                             .as_ref()
                             .expect("plain queued semop entry is preallocated");
-                        prepared_entry.update_blocker(blocker);
+                        set.update_blocker(prepared_entry, blocker);
                         set.enqueue_waiter(prepared_entry.clone());
                         break prepared_entry.clone();
                     }
@@ -2160,6 +2160,65 @@ mod tests {
         for entry in entries {
             assert!(entry.complete(Err(SystemError::EINTR)));
         }
+    }
+
+    #[test]
+    fn wait_counts_follow_only_linked_current_blockers() {
+        let mut manager = SemManager::new();
+        let id = insert_test_set(&mut manager, SemKey::new(156), &[0, 1]);
+        let set = manager.get_by_semid_checked_mut(id).unwrap();
+        let (_waiter, waker) = Waiter::new_pair();
+        let increase = SemBlockedOp {
+            semnum: 0,
+            wait_type: SemWaitType::Increase,
+            nowait: false,
+        };
+        let zero = SemBlockedOp {
+            semnum: 1,
+            wait_type: SemWaitType::Zero,
+            nowait: false,
+        };
+        let entry = Arc::new(SemQueueEntry::new(
+            &[plain_sop(0, -1), plain_sop(1, 0)],
+            None,
+            waker,
+            increase,
+        ));
+        set.update_blocker(&entry, zero);
+        assert_eq!((set.ncnt(0), set.zcnt(1)), (0, 0));
+        set.enqueue_waiter(entry.clone());
+        assert_eq!((set.ncnt(0), set.zcnt(1)), (0, 1));
+        set.update_blocker(&entry, increase);
+        assert_eq!((set.ncnt(0), set.zcnt(1)), (1, 0));
+        set.update_blocker(&entry, increase); // No double-accounting.
+        let same_slot_zero = SemBlockedOp { semnum: 0, ..zero };
+        set.update_blocker(&entry, same_slot_zero);
+        assert_eq!((set.ncnt(0), set.zcnt(0)), (0, 1));
+        for semnum in 0..2 {
+            for (kind, cached) in [
+                (SemWaitType::Increase, set.ncnt(semnum)),
+                (SemWaitType::Zero, set.zcnt(semnum)),
+            ] {
+                let scanned = set
+                    .pending_const
+                    .iter()
+                    .chain(set.pending_alter.iter())
+                    .filter(|entry| entry.is_waiting_on(semnum, kind))
+                    .count();
+                assert_eq!(cached, scanned);
+            }
+        }
+        set.remove_waiter(&entry);
+        set.remove_waiter(&entry);
+        assert_eq!((set.ncnt(0), set.zcnt(0)), (0, 0));
+        set.enqueue_waiter(entry.clone());
+        let mut wakes = SemWakeBatch::default();
+        set.complete_all_removed(&mut wakes);
+        assert_eq!(
+            (set.ncnt(0), set.zcnt(0), set.ncnt(1), set.zcnt(1)),
+            (0, 0, 0, 0)
+        );
+        assert_eq!(entry.completed_result(), Some(Err(SystemError::EIDRM)));
     }
 
     #[test]
