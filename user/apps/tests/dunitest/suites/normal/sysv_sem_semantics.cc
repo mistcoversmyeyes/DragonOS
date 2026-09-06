@@ -8,6 +8,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <grp.h>
 #include <limits.h>
 #include <memory>
 #include <sched.h>
@@ -537,6 +538,62 @@ TEST(SysVSem, IpcSetInvalidGidDoesNotPartiallyUpdate) {
     EXPECT_EQ(before.sem_perm.uid, after.sem_perm.uid);
     EXPECT_EQ(before.sem_perm.gid, after.sem_perm.gid);
     EXPECT_EQ(before.sem_perm.mode & 0777, after.sem_perm.mode & 0777);
+}
+
+TEST(SysVSem, CreatorAndCurrentGroupsRetainAccessAfterIpcSet) {
+    if (geteuid() != 0) {
+        GTEST_SKIP() << "requires root to establish independent reader credentials";
+    }
+    SemSet sem(1, IPC_CREAT | 0660);
+    ASSERT_TRUE(sem.valid());
+    struct semid_ds ds = {};
+    ASSERT_EQ(0, SemCtl(sem.id(), 0, IPC_STAT, reinterpret_cast<unsigned long>(&ds)));
+    const gid_t creator_group = ds.sem_perm.cgid;
+    const gid_t current_group = creator_group == 1001 ? 1002 : 1001;
+    const gid_t unrelated_group = creator_group == 1003 ? 1004 : 1003;
+    ds.sem_perm.gid = current_group;
+    ASSERT_EQ(0, SemCtl(sem.id(), 0, IPC_SET, reinterpret_cast<unsigned long>(&ds)));
+    ASSERT_EQ(0, SemCtl(sem.id(), 0, IPC_STAT, reinterpret_cast<unsigned long>(&ds)));
+    ASSERT_EQ(creator_group, ds.sem_perm.cgid);
+    ASSERT_EQ(current_group, ds.sem_perm.gid);
+
+    // Linux ipcperms() uses both cgid and gid, for effective and supplementary
+    // membership. None of these readers is the owner/creator or retains root.
+    for (int access_case = 0; access_case < 5; ++access_case) {
+        SCOPED_TRACE(access_case);
+        const pid_t pid = fork();
+        ASSERT_GE(pid, 0);
+        if (pid == 0) {
+            const gid_t group = access_case % 2 == 0 ? creator_group : current_group;
+            const bool supplementary = access_case == 2 || access_case == 3;
+            if (setgroups(supplementary ? 1 : 0, supplementary ? &group : nullptr) != 0 ||
+                setgid(access_case < 2 ? group : unrelated_group) != 0 ||
+                setuid(12345) != 0) {
+                _exit(210);
+            }
+            const bool allowed = access_case < 4;
+            errno = 0;
+            const int value = SemCtl(sem.id(), 0, GETVAL, 0);
+            if (allowed ? value != 0 : (value != -1 || errno != EACCES)) _exit(211);
+            struct sembuf zero = {0, 0, IPC_NOWAIT};
+            errno = 0;
+            const int read_result = SemOp(sem.id(), &zero, 1);
+            if (allowed ? read_result != 0 : (read_result != -1 || errno != EACCES)) _exit(212);
+            struct sembuf alter[] = {{0, 1, IPC_NOWAIT}, {0, -1, IPC_NOWAIT}};
+            errno = 0;
+            const int write_result = SemOp(sem.id(), alter, 2);
+            if (allowed ? write_result != 0 : (write_result != -1 || errno != EACCES)) _exit(213);
+            // Group access does not confer ownership/control privileges.
+            errno = 0;
+            if (SemCtl(sem.id(), 0, IPC_SET, reinterpret_cast<unsigned long>(&ds)) != -1 ||
+                errno != EPERM) _exit(214);
+            errno = 0;
+            if (SemCtl(sem.id(), 0, IPC_RMID, 0) != -1 || errno != EPERM) _exit(215);
+            _exit(0);
+        }
+        ChildGuard child(pid);
+        WaitChildOk(&child);
+    }
 }
 
 TEST(SysVSem, OwnerCanControlModeZeroSet) {
