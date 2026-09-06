@@ -68,12 +68,7 @@ pub(super) fn replay_marked_records(pcb: &Arc<ProcessControlBlock>, group: &Arc<
     });
 
     let Some(ipc_ns) = group.ipc_ns.upgrade() else {
-        for record in group.discard_retired_records() {
-            log::debug!(
-                "dropping SEM_UNDO record for semid {} after IPC namespace teardown",
-                record.semid.data()
-            );
-        }
+        drop(group.discard_retired_records());
         return;
     };
 

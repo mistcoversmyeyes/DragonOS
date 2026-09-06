@@ -28,8 +28,7 @@ impl SemUndoGroup {
         self.inner
             .lock_irqsave()
             .records
-            .iter()
-            .find(|record| record.semid == semid)
+            .get(semid)
             .map(|record| record.adjustment(semnum))
             .unwrap_or_default()
     }
@@ -72,7 +71,11 @@ impl SemUndoGroup {
     #[cfg(test)]
     pub(crate) fn insert_test_record(&self, semid: SemId, adjustments: &[i16]) {
         let mut state = self.inner.lock_irqsave();
-        state.records.push(SemUndoRecord::new_live(
+        let required = state.records.len() + 1;
+        let mut spare = UndoRecords::default();
+        spare.prepare(required).unwrap();
+        state.records.install_prepared(&mut spare, required);
+        state.records.push_prepared(SemUndoRecord::new_live(
             semid,
             adjustments.to_vec().into_boxed_slice(),
         ));
@@ -92,7 +95,8 @@ impl SemUndoGroup {
     pub(crate) fn set_record_capacity_for_test(&self, capacity: usize) {
         let mut state = self.inner.lock_irqsave();
         assert!(state.records.is_empty());
-        state.records = Vec::with_capacity(capacity);
+        state.records = UndoRecords::default();
+        state.records.prepare(capacity).unwrap();
         assert_eq!(state.records.capacity(), capacity);
     }
 

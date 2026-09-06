@@ -118,24 +118,40 @@ pub struct PosixSemBuf {
     pub sem_flg: i16,
 }
 
-/// Semaphore-set information matching Linux x86_64 `struct semid64_ds` (104 bytes,
-/// including the high halves of 32-bit timestamp fields)
+/// Linux `semid64_ds`: x86_64 has historical padding after each 64-bit time;
+/// the supported asm-generic 64-bit architectures do not.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PosixSemIdDs {
     /// Permission information
     pub sem_perm: PosixIpcPerm,
-    /// Time of the last `semop` (64-bit; upper 32 bits are in `__sem_otime_high`)
+    /// Time of the last `semop`
     pub sem_otime: i64,
-    _sem_otime_high: i64,
+    #[cfg(target_arch = "x86_64")]
+    _otime_padding: u64,
     /// Time of the last metadata change
     pub sem_ctime: i64,
-    _sem_ctime_high: i64,
+    #[cfg(target_arch = "x86_64")]
+    _ctime_padding: u64,
     /// Number of semaphores in the set
     pub sem_nsems: usize,
     _unused1: usize,
     _unused2: usize,
 }
+
+// Keep the copy size and field positions tied to the target Linux UAPI.
+const _: () = {
+    assert!(core::mem::offset_of!(PosixSemIdDs, sem_otime) == 48);
+    if cfg!(target_arch = "x86_64") {
+        assert!(core::mem::size_of::<PosixSemIdDs>() == 104);
+        assert!(core::mem::offset_of!(PosixSemIdDs, sem_ctime) == 64);
+        assert!(core::mem::offset_of!(PosixSemIdDs, sem_nsems) == 80);
+    } else {
+        assert!(core::mem::size_of::<PosixSemIdDs>() == 88);
+        assert!(core::mem::offset_of!(PosixSemIdDs, sem_ctime) == 56);
+        assert!(core::mem::offset_of!(PosixSemIdDs, sem_nsems) == 64);
+    }
+};
 
 /// Semaphore system information matching Linux `struct seminfo` (40 bytes)
 #[repr(C)]

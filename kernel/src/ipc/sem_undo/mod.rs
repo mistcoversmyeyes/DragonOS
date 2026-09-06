@@ -10,10 +10,12 @@ use system_error::SystemError;
 
 mod lifecycle;
 mod record;
+mod storage;
 pub use lifecycle::SemUndoAttachment;
 pub(crate) use lifecycle::{detach_sem_undo, UnpublishedSemUndoAttachmentGuard};
 use record::PendingSemUndoRecordReservation;
 pub(crate) use record::{PreparedSemUndoRecord, PreparedSemUndoRecordAction, SemUndoRecord};
+use storage::UndoRecords;
 
 #[derive(Debug)]
 pub struct SemUndoGroup {
@@ -24,7 +26,7 @@ pub struct SemUndoGroup {
 #[derive(Debug)]
 struct SemUndoGroupState {
     task_owners: usize,
-    records: Vec<SemUndoRecord>,
+    records: UndoRecords,
     reserved_records: usize,
     phase: UndoPhase,
     #[cfg(test)]
@@ -38,33 +40,13 @@ enum UndoPhase {
     Replaying,
 }
 
-fn prepare_records_storage_capacity(
-    records: &mut Vec<SemUndoRecord>,
-    required_capacity: usize,
-) -> Result<(), SystemError> {
-    if records.capacity() >= required_capacity {
-        return Ok(());
-    }
-
-    let additional = required_capacity
-        .checked_sub(records.len())
-        .ok_or(SystemError::ENOMEM)?;
-    records
-        .try_reserve_exact(additional)
-        .map_err(|_| SystemError::ENOMEM)?;
-    if records.capacity() < required_capacity {
-        return Err(SystemError::ENOMEM);
-    }
-    Ok(())
-}
-
 impl SemUndoGroup {
     pub(crate) fn new(ipc_ns: &Arc<IpcNamespace>) -> Result<Arc<Self>, SystemError> {
         Arc::try_new(Self {
             ipc_ns: Arc::downgrade(ipc_ns),
             inner: SpinLock::new(SemUndoGroupState {
                 task_owners: 1,
-                records: Vec::new(),
+                records: UndoRecords::default(),
                 reserved_records: 0,
                 phase: UndoPhase::Active,
                 #[cfg(test)]
@@ -149,7 +131,7 @@ impl SemUndoGroup {
     }
 
     /// Only valid after the bound namespace can no longer be upgraded.
-    fn discard_retired_records(&self) -> Vec<SemUndoRecord> {
+    fn discard_retired_records(&self) -> UndoRecords {
         let mut state = self.inner.lock_irqsave();
         debug_assert!(state.phase == UndoPhase::Replaying);
         core::mem::take(&mut state.records)
@@ -161,7 +143,7 @@ impl SemUndoGroup {
         nsems: usize,
     ) -> Result<PreparedSemUndoRecord, SystemError> {
         let mut adjustments = Vec::new();
-        let mut reserved_storage = Vec::new();
+        let mut reserved_storage = UndoRecords::default();
 
         loop {
             let mut state = self.inner.lock_irqsave();
@@ -169,7 +151,7 @@ impl SemUndoGroup {
                 return Err(SystemError::EINVAL);
             }
 
-            if let Some(existing) = state.records.iter().find(|item| item.semid == semid) {
+            if let Some(existing) = state.records.get(semid) {
                 if existing.adjustments.len() != nsems {
                     return Err(SystemError::EINVAL);
                 }
@@ -197,15 +179,23 @@ impl SemUndoGroup {
                 .and_then(|capacity| capacity.checked_add(1))
                 .ok_or(SystemError::ENOMEM)?;
 
-            if state.records.capacity() < required_capacity {
-                if reserved_storage.capacity() < required_capacity {
+            if !state.records.can_hold(required_capacity) {
+                // Rebuild both together even when only hash tombstones exhaust
+                // insertion capacity. Dense capacity also bounds index residency.
+                let capacity = state.records.capacity();
+                let target = if capacity < required_capacity {
+                    required_capacity.max(capacity.saturating_mul(2)).max(4)
+                } else {
+                    capacity
+                };
+                if !reserved_storage.can_hold(target) {
                     drop(state);
-                    prepare_records_storage_capacity(&mut reserved_storage, required_capacity)?;
+                    reserved_storage.prepare(target)?;
                     continue;
                 }
-
-                reserved_storage.append(&mut state.records);
-                core::mem::swap(&mut state.records, &mut reserved_storage);
+                state
+                    .records
+                    .install_prepared(&mut reserved_storage, required_capacity);
             }
 
             state.reserved_records = state
@@ -263,13 +253,8 @@ impl SemUndoGroup {
             return Err(SystemError::EINVAL);
         }
 
-        let existing_index = state
-            .records
-            .iter()
-            .position(|item| item.semid == record.semid);
-
-        if let Some(index) = existing_index {
-            if state.records[index].adjustments.len() != record.nsems {
+        if let Some(existing) = state.records.get(record.semid) {
+            if existing.adjustments.len() != record.nsems {
                 return Err(SystemError::EINVAL);
             }
             _retired_candidate = record.candidate.take();
@@ -281,7 +266,7 @@ impl SemUndoGroup {
                 reservation.disarm();
             }
 
-            return match f(&mut state.records[index]) {
+            return match f(state.records.get_mut(record.semid).unwrap()) {
                 PreparedSemUndoRecordAction::Complete(result) => Ok((result, None)),
                 PreparedSemUndoRecordAction::Keep(result) => Ok((result, Some(record))),
             };
@@ -293,7 +278,7 @@ impl SemUndoGroup {
         if record.candidate.is_none() {
             return Err(SystemError::EINVAL);
         }
-        if state.records.len() >= state.records.capacity() {
+        if !state.records.can_hold(state.records.len() + 1) {
             return Err(SystemError::ENOMEM);
         }
         if let Some(mut reservation) = record.reservation.take() {
@@ -303,8 +288,10 @@ impl SemUndoGroup {
                 .expect("SEM_UNDO record reservation count underflow");
             reservation.disarm();
         }
-        state.records.push(record.candidate.take().unwrap());
-        match f(state.records.last_mut().unwrap()) {
+        state
+            .records
+            .push_prepared(record.candidate.take().unwrap());
+        match f(state.records.get_mut(record.semid).unwrap()) {
             PreparedSemUndoRecordAction::Complete(result) => Ok((result, None)),
             PreparedSemUndoRecordAction::Keep(result) => Ok((result, Some(record))),
         }
@@ -316,32 +303,24 @@ impl SemUndoGroup {
         f: impl FnOnce(&mut SemUndoRecord) -> R,
     ) -> Option<R> {
         let mut state = self.inner.lock_irqsave();
-        state
-            .records
-            .iter_mut()
-            .find(|record| record.semid == semid)
-            .map(f)
+        state.records.get_mut(semid).map(f)
     }
 
     pub(crate) fn take_record(&self, semid: SemId) -> Option<SemUndoRecord> {
         let mut state = self.inner.lock_irqsave();
-        let index = state
-            .records
-            .iter()
-            .position(|record| record.semid == semid)?;
-        Some(state.records.swap_remove(index))
+        state.records.remove(semid)
     }
 
     /// Best-effort reclamation. Caller must hold neither manager nor group lock.
     /// Preparation and old-buffer disposal stay outside both critical sections.
     pub(crate) fn shrink_records(&self) {
-        let mut spare = Vec::new();
-        let mut retired = Vec::new();
+        let mut spare = UndoRecords::default();
+        let mut retired = UndoRecords::default();
         let needed = {
             let mut state = self.inner.lock_irqsave();
             state.shrink_records_prepared(&mut spare, &mut retired)
         };
-        if needed == 0 || spare.try_reserve_exact(needed).is_err() {
+        if needed == 0 || spare.prepare(needed).is_err() {
             return;
         }
         let mut state = self.inner.lock_irqsave();
@@ -354,8 +333,8 @@ impl SemUndoGroupState {
     /// Recheck after unlocked allocation: another prepare may need more slots.
     fn shrink_records_prepared(
         &mut self,
-        spare: &mut Vec<SemUndoRecord>,
-        retired: &mut Vec<SemUndoRecord>,
+        spare: &mut UndoRecords,
+        retired: &mut UndoRecords,
     ) -> usize {
         debug_assert!(spare.is_empty());
         debug_assert!(retired.is_empty() && retired.capacity() == 0);
@@ -369,12 +348,11 @@ impl SemUndoGroupState {
         if self.records.capacity() <= 4 || required > self.records.capacity() / 4 {
             return 0;
         }
-        if spare.capacity() < required {
+        if !spare.can_hold(required) {
             return required.saturating_mul(2).max(4);
         }
         if spare.capacity() < self.records.capacity() {
-            spare.append(&mut self.records);
-            core::mem::swap(&mut self.records, spare);
+            self.records.install_prepared(spare, required);
         }
         0
     }

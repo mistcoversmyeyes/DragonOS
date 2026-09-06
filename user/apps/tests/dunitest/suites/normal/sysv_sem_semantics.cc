@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/ipc.h>
+#include <sys/mman.h>
 #include <sys/sem.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
@@ -452,6 +453,48 @@ TEST(SysVSem, SemStatAndSemStatAny) {
     ASSERT_GE(ret, 0) << "SEM_STAT_ANY failed: errno=" << errno;
     EXPECT_EQ(sem.id(), ret) << "SEM_STAT_ANY must return the full semid";
     EXPECT_EQ(1u, ds.sem_nsems);
+}
+
+TEST(SysVSem, StatLayoutAndExactUserBufferBounds) {
+    SemSet sem(3, IPC_CREAT | 0600);
+    ASSERT_TRUE(sem.valid());
+    struct sembuf op = {0, 1, 0};
+    ASSERT_EQ(0, SemOp(sem.id(), &op, 1));
+
+    struct Buffer {
+        struct semid_ds ds;
+        unsigned char canary[32];
+    } buffer;
+    for (int cmd : {IPC_STAT, SEM_STAT, SEM_STAT_ANY}) {
+        memset(&buffer, 0xa5, sizeof(buffer));
+        int id = cmd == IPC_STAT ? sem.id() : sem.id() & 0x7fff;
+        ASSERT_EQ(cmd == IPC_STAT ? 0 : sem.id(),
+                  SemCtl(id, 0, cmd, reinterpret_cast<unsigned long>(&buffer.ds)));
+        EXPECT_EQ(3u, buffer.ds.sem_nsems);
+        EXPECT_GT(buffer.ds.sem_otime, 0);
+        EXPECT_GT(buffer.ds.sem_ctime, 0);
+        for (unsigned char byte : buffer.canary) EXPECT_EQ(0xa5, byte);
+    }
+
+    const long page = sysconf(_SC_PAGESIZE);
+    ASSERT_GT(page, static_cast<long>(sizeof(struct semid_ds)));
+    void* mapping = mmap(nullptr, page * 2, PROT_READ | PROT_WRITE,
+                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    ASSERT_NE(MAP_FAILED, mapping);
+    // Keep cleanup armed even if a following assertion fails.
+    auto unmap = [page](void* p) { munmap(p, page * 2); };
+    std::unique_ptr<void, decltype(unmap)> guard(mapping, unmap);
+    ASSERT_EQ(0, mprotect(static_cast<char*>(mapping) + page, page, PROT_NONE));
+    auto* ds = reinterpret_cast<struct semid_ds*>(
+        static_cast<char*>(mapping) + page - sizeof(struct semid_ds));
+    for (int cmd : {IPC_STAT, SEM_STAT, SEM_STAT_ANY}) {
+        int id = cmd == IPC_STAT ? sem.id() : sem.id() & 0x7fff;
+        ASSERT_EQ(cmd == IPC_STAT ? 0 : sem.id(),
+                  SemCtl(id, 0, cmd, reinterpret_cast<unsigned long>(ds))) << errno;
+        EXPECT_EQ(3u, ds->sem_nsems);
+    }
+    ds->sem_perm.mode = 0640;
+    EXPECT_EQ(0, SemCtl(sem.id(), 0, IPC_SET, reinterpret_cast<unsigned long>(ds))) << errno;
 }
 
 TEST(SysVSem, IpcSetMode) {
@@ -2995,6 +3038,50 @@ TEST(SysVSem, PersistentUndoGroupSurvivesRemovalAndRecordRegrowth) {
     ASSERT_TRUE(WriteExact(resume_write.get(), &token, 1));
     WaitChildOk(&child);
     EXPECT_EQ(0, SemCtl(sets.back()->id(), 0, GETVAL, 0));
+}
+
+TEST(SysVSem, UndoLookupSurvivesInterleavedRecordRemoval) {
+    constexpr int kSets = 64;
+    std::vector<std::unique_ptr<SemSet>> sets;
+    for (int i = 0; i < kSets; ++i) {
+        sets.emplace_back(new SemSet(1, IPC_CREAT | 0600));
+        ASSERT_TRUE(sets.back()->valid());
+    }
+    int ready[2], resume[2];
+    ASSERT_EQ(0, pipe(ready));
+    FdGuard ready_read(ready[0]), ready_write(ready[1]);
+    ASSERT_EQ(0, pipe(resume));
+    FdGuard resume_read(resume[0]), resume_write(resume[1]);
+    pid_t pid = fork();
+    ASSERT_GE(pid, 0);
+    if (pid == 0) {
+        ready_read.Close();
+        resume_write.Close();
+        for (int i = 0; i < kSets; ++i)
+            if (!SemUndoOpMustSucceed(sets[i]->id(), 0, i + 1)) _exit(185);
+        char token = 1;
+        if (!WriteExact(ready_write.get(), &token, 1) ||
+            !ReadExact(resume_read.get(), &token, 1)) _exit(186);
+        // Removal swaps dense slots: every surviving full ID must still find
+        // its own debt, including subsequent control and final exit replay.
+        for (int i = kSets - 1; i >= 0; i -= 2)
+            if (!SemUndoOpMustSucceed(sets[i]->id(), 0, 2)) _exit(187);
+        _exit(0);
+    }
+    ChildGuard child(pid);
+    ready_write.Close();
+    resume_read.Close();
+    char token;
+    ASSERT_TRUE(ReadExact(ready_read.get(), &token, 1));
+    for (int i = 0; i < kSets; i += 2) {
+        ASSERT_EQ(0, SemCtl(sets[i]->id(), 0, IPC_RMID, 0));
+        sets[i]->release();
+    }
+    ASSERT_EQ(0, SemCtl(sets[1]->id(), 0, SETVAL, 9));
+    ASSERT_TRUE(WriteExact(resume_write.get(), &token, 1));
+    WaitChildOk(&child);
+    for (int i = 1; i < kSets; i += 2)
+        EXPECT_EQ(i == 1 ? 9 : 0, SemCtl(sets[i]->id(), 0, GETVAL, 0));
 }
 
 TEST(SysVSem, ConcurrentWorkers) {
