@@ -232,23 +232,27 @@ impl SemManager {
                         let outcome =
                             set.try_apply(sops, pid.clone(), Some(record), &mut immediate_scratch);
                         match outcome {
-                            Ok(SemAttempt::Completed { .. }) => {
-                                PreparedSemUndoRecordAction::Complete(Ok(None))
+                            Ok(completed @ SemAttempt::Completed { .. }) => {
+                                PreparedSemUndoRecordAction::Complete(Ok(completed))
                             }
                             Ok(SemAttempt::Blocked(blocker)) => {
-                                PreparedSemUndoRecordAction::Keep(Ok(Some(blocker)))
+                                PreparedSemUndoRecordAction::Keep(Ok(SemAttempt::Blocked(blocker)))
                             }
                             Err(error) => PreparedSemUndoRecordAction::Keep(Err(error)),
                         }
                     })?;
                 *record_slot = kept_record;
                 match outcome? {
-                    None => {
+                    SemAttempt::Completed {
+                        waiter_state_changed,
+                    } => {
                         drop(record_slot);
-                        set.update_queue(&mut wakes);
+                        if waiter_state_changed {
+                            set.update_queue(&mut wakes);
+                        }
                         return Ok(0);
                     }
-                    Some(blocker) => {
+                    SemAttempt::Blocked(blocker) => {
                         if blocker.nowait || non_blocking {
                             return Err(SystemError::EAGAIN_OR_EWOULDBLOCK);
                         }
@@ -264,8 +268,12 @@ impl SemManager {
             } else {
                 let set = guard.get_by_semid_checked_mut(semid)?;
                 match set.try_apply(sops, pid.clone(), None, &mut immediate_scratch)? {
-                    SemAttempt::Completed { .. } => {
-                        set.update_queue(&mut wakes);
+                    SemAttempt::Completed {
+                        waiter_state_changed,
+                    } => {
+                        if waiter_state_changed {
+                            set.update_queue(&mut wakes);
+                        }
                         return Ok(0);
                     }
                     SemAttempt::Blocked(blocker) => {

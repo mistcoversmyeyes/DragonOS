@@ -195,26 +195,29 @@ impl KernelSemSet {
         pid: Option<Arc<Pid>>,
         mut undo: Option<&mut SemUndoRecord>,
     ) -> bool {
-        let mut values_changed = false;
+        let mut waiter_state_changed = false;
         for entry in scratch.entries.iter().take(simulation.entry_count) {
             let sem = &mut set.sems[entry.semnum];
-            values_changed |= entry.initial_val != entry.virtual_val;
+            waiter_state_changed |= entry.initial_val != entry.virtual_val;
             sem.val = entry.virtual_val;
             sem.pid = pid.clone();
             if entry.virtual_adj != entry.initial_adj {
                 if let Some(record) = undo.as_deref_mut() {
                     record.set_adjustment(entry.semnum, entry.virtual_adj);
+                    // Shared undo debt can change a queued operation's ERANGE result
+                    // even when the semaphore value is unchanged.
+                    waiter_state_changed = true;
                 }
             }
         }
         set.sem_otime = PosixTimeSpec::now().tv_sec;
-        values_changed
+        waiter_state_changed
     }
 }
 
 #[derive(Debug)]
 pub(in crate::ipc::sem) enum SemAttempt {
-    Completed { values_changed: bool },
+    Completed { waiter_state_changed: bool },
     Blocked(SemBlockedOp),
 }
 impl KernelSemSet {
@@ -229,7 +232,7 @@ impl KernelSemSet {
     ) -> Result<SemAttempt, SystemError> {
         match Self::simulate_semop(self, sops, undo.as_deref_mut(), scratch)? {
             SemopOutcome::Ready(simulation) => Ok(SemAttempt::Completed {
-                values_changed: Self::commit_semop(self, simulation, scratch, pid, undo),
+                waiter_state_changed: Self::commit_semop(self, simulation, scratch, pid, undo),
             }),
             SemopOutcome::Blocked(blocker) => Ok(SemAttempt::Blocked(blocker)),
         }

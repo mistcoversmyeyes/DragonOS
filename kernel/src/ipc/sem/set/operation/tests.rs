@@ -15,7 +15,7 @@ fn try_apply_commits_metadata_even_when_values_are_unchanged() {
             &mut scratch
         ),
         Ok(SemAttempt::Completed {
-            values_changed: false
+            waiter_state_changed: false
         })
     ));
     assert_eq!(set.sems[0].val, 4);
@@ -38,7 +38,7 @@ fn try_apply_rebuilds_scratch_after_a_blocked_attempt() {
     assert!(matches!(
         set.try_apply(&[plain_sop(0, -1)], None, None, &mut scratch),
         Ok(SemAttempt::Completed {
-            values_changed: true
+            waiter_state_changed: true
         })
     ));
     assert_eq!(set.sems[0].val, 0);

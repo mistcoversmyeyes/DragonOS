@@ -2176,6 +2176,81 @@ TEST(SysVSem, SharedUndoFailurePreservesQueuedAssociation) {
     }
 }
 
+int DebtOnlyChangeWaiter(void* opaque) {
+    const int semid = *static_cast<int*>(opaque);
+    struct sembuf ops[] = {{0, -1, SEM_UNDO}, {1, -1, SEM_UNDO}};
+    const timespec timeout = {5, 0};
+    const int result = SemTimedOp(semid, ops, 2, &timeout);
+    // A missed queue scan must fail with the bounded timeout, not hang the suite.
+    return result == -1 && errno == ERANGE ? 0 : 191;
+}
+
+int DebtOnlyChangeQueuedWriter(void* opaque) {
+    const int semid = *static_cast<int*>(opaque);
+    struct sembuf ops[] = {{2, 0, 0}, {0, 1, 0}, {0, -1, SEM_UNDO}};
+    const timespec timeout = {5, 0};
+    return SemTimedOp(semid, ops, 3, &timeout) == 0 ? 0 : 200;
+}
+
+int RunDebtOnlyChangeSupervisor(int semid, bool queued_change) {
+    // semval stays 1 while this group's positive adjustment reaches 32766.
+    struct sembuf prepare[] = {{0, 32766, 0}, {0, -32766, SEM_UNDO}};
+    if (SemOp(semid, prepare, 2) != 0) return 192;
+    alignas(16) char stack[16384];
+    pid_t pid = clone(DebtOnlyChangeWaiter, stack + sizeof(stack),
+                      CLONE_SYSVSEM | SIGCHLD, &semid);
+    if (pid < 0) return 193;
+    ChildGuard child(pid);
+    // Its first operation fits semadj=32767; the second blocks on semval=0.
+    if (!WaitForNcnt(semid, 1, 1)) return 194;
+    if (queued_change) {
+        alignas(16) char writer_stack[16384];
+        pid_t writer_pid = clone(DebtOnlyChangeQueuedWriter, writer_stack + sizeof(writer_stack),
+                                 CLONE_SYSVSEM | SIGCHLD, &semid);
+        if (writer_pid < 0) return 201;
+        ChildGuard writer(writer_pid);
+        if (!WaitForZcnt(semid, 2, 1)) return 202;
+        // A is scanned first and still blocks; B then changes only undo debt.
+        // Queue processing must restart and discover A's new ERANGE condition.
+        if (SemCtl(semid, 2, SETVAL, 0) != 0) return 203;
+        int writer_status;
+        pid_t ret;
+        do { ret = waitpid(writer_pid, &writer_status, 0); } while (ret < 0 && errno == EINTR);
+        if (ret != writer_pid) return 204;
+        writer.MarkReaped();
+        if (!WIFEXITED(writer_status) || WEXITSTATUS(writer_status) != 0) return 205;
+    } else {
+        struct sembuf change[] = {{0, 1, 0}, {0, -1, SEM_UNDO}};
+        if (SemOp(semid, change, 2) != 0) return 195;
+    }
+    // Values are unchanged, but another -1 SEM_UNDO now overflows the shared
+    // adjustment. The queued operation must be retried without any value wakeup.
+    if (SemCtl(semid, 0, GETVAL, 0) != 1 || SemCtl(semid, 1, GETVAL, 0) != 0) return 196;
+    int status;
+    pid_t ret;
+    do { ret = waitpid(pid, &status, 0); } while (ret < 0 && errno == EINTR);
+    if (ret != pid) return 197;
+    child.MarkReaped();
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) return 198;
+    return SemCtl(semid, 1, GETNCNT, 0) == 0 ? 0 : 199;
+}
+
+TEST(SysVSem, SharedUndoDebtOnlyChangeRetriesQueuedOperation) {
+    for (bool queued_change : {false, true}) {
+        SCOPED_TRACE(queued_change ? "queued debt-only change" : "immediate debt-only change");
+        SemSet sem(3, IPC_CREAT | 0600);
+        ASSERT_TRUE(sem.valid());
+        ASSERT_EQ(0, SemCtl(sem.id(), 0, SETVAL, 1));
+        ASSERT_EQ(0, SemCtl(sem.id(), 2, SETVAL, 1));
+        pid_t pid = fork();
+        ASSERT_GE(pid, 0);
+        // Isolate the shared undo group from the test runner's existing records.
+        if (pid == 0) _exit(RunDebtOnlyChangeSupervisor(sem.id(), queued_change));
+        ChildGuard supervisor(pid);
+        WaitChildOk(&supervisor);
+    }
+}
+
 TEST(SysVSem, GetNcntCountsBlocked) {
     SemSet sem(1, IPC_CREAT | 0600);
     ASSERT_TRUE(sem.valid());

@@ -471,7 +471,7 @@ impl KernelSemSet {
             let mut scratch = entry.scratch.lock();
             match set.try_apply(&entry.sops, entry.pid.clone(), None, &mut scratch) {
                 Ok(SemAttempt::Completed {
-                    values_changed: changed,
+                    waiter_state_changed: changed,
                 }) => {
                     set.finish_and_wake(queue, entry.clone(), Ok(0), wakes);
                     if changed {
@@ -519,7 +519,9 @@ impl KernelSemSet {
         }
         let mut scratch = entry.scratch.lock();
         match set.try_apply(&entry.sops, entry.pid.clone(), Some(record), &mut scratch) {
-            Ok(SemAttempt::Completed { values_changed }) => Ok(Some(values_changed)),
+            Ok(SemAttempt::Completed {
+                waiter_state_changed,
+            }) => Ok(Some(waiter_state_changed)),
             Ok(SemAttempt::Blocked(blocker)) => {
                 if blocker.nowait {
                     Err(SystemError::EAGAIN_OR_EWOULDBLOCK)
