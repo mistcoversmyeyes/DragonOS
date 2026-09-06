@@ -142,11 +142,9 @@ impl SemManager {
         vals: &[u16],
         wakes: &mut SemWakeBatch,
     ) -> Result<(), SystemError> {
-        let set_nsems = self
-            .get_by_semid_checked(token.id)
-            .map_err(|_| SystemError::EIDRM)?
-            .nsems();
-        if vals.len() != token.nsems || vals.len() != set_nsems {
+        // Linux validates the copied array before re-locking the target:
+        // an out-of-range value wins over removal during the user copy.
+        if vals.len() != token.nsems {
             return Err(SystemError::EINVAL);
         }
         if vals.iter().any(|&v| v as i32 > SEMVMX) {
@@ -156,6 +154,9 @@ impl SemManager {
         let set = self
             .get_by_semid_checked_mut(token.id)
             .map_err(|_| SystemError::EIDRM)?;
+        if vals.len() != set.nsems() {
+            return Err(SystemError::EINVAL);
+        }
         set.setall(token.id, vals, wakes);
         Ok(())
     }

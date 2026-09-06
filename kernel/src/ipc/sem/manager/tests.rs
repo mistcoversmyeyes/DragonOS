@@ -144,6 +144,18 @@ fn prepared_setall_token_returns_eidrm_after_rmid() {
 }
 
 #[test]
+fn prepared_setall_range_error_precedes_removal() {
+    let mut manager = SemManager::new();
+    let id = insert_test_set(&mut manager, SemKey::new(12), &[1, 2]);
+    let token = SemSetAllToken::new(id, 2);
+    remove_test_set(&mut manager, id);
+    assert_eq!(
+        manager.setall(token, &[7, 32768], &mut SemWakeBatch::default()),
+        Err(SystemError::ERANGE)
+    );
+}
+
+#[test]
 fn stale_prepared_setall_token_does_not_modify_reused_index() {
     let mut manager = SemManager::new();
     let old_id = insert_test_set(&mut manager, SemKey::new(21), &[1, 2]);

@@ -214,7 +214,7 @@ pub fn ksys_setns(fd: i32, nstype: i32) -> Result<(), SystemError> {
         let new_nsproxy = Arc::new(new_inner);
         let fs_refs = lock_fs_refs_copy();
         let prepared = prepare_setns_install(&current, new_nsproxy, None, flags, &fs_refs)?;
-        prepared.commit(&current, &fs_refs)?;
+        prepared.commit(&current, fs_refs)?;
         return Ok(());
     }
 
@@ -303,7 +303,7 @@ pub fn ksys_setns(fd: i32, nstype: i32) -> Result<(), SystemError> {
         installation_flags,
         &fs_refs,
     )?;
-    prepared.commit(&current, &fs_refs)?;
+    prepared.commit(&current, fs_refs)?;
 
     Ok(())
 }
@@ -359,7 +359,7 @@ mod tests {
             &fs_refs,
         )
         .unwrap();
-        prepared.commit(&pcb, &fs_refs).unwrap();
+        prepared.commit(&pcb, fs_refs).unwrap();
 
         assert!(Arc::ptr_eq(&pcb.nsproxy(), &old_nsproxy));
         assert!(pcb.sem_undo_group().is_none());

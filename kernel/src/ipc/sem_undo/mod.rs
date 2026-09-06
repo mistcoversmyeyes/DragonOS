@@ -12,7 +12,9 @@ mod lifecycle;
 mod record;
 mod storage;
 pub use lifecycle::SemUndoAttachment;
-pub(crate) use lifecycle::{detach_sem_undo, UnpublishedSemUndoAttachmentGuard};
+pub(crate) use lifecycle::{
+    detach_sem_undo, PendingSemUndoReplay, UnpublishedSemUndoAttachmentGuard,
+};
 use record::PendingSemUndoRecordReservation;
 pub(crate) use record::{PreparedSemUndoRecord, PreparedSemUndoRecordAction, SemUndoRecord};
 use storage::UndoRecords;

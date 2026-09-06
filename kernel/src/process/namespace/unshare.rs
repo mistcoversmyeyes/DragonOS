@@ -29,7 +29,7 @@ pub fn ksys_unshare(flags: CloneFlags) -> Result<(), SystemError> {
     if let Some(prepared) =
         prepare_unshare_install(&current_pcb, flags, new_fs, new_nsproxy, new_cred, &fs_refs)?
     {
-        prepared.commit(&current_pcb, &fs_refs)?;
+        prepared.commit(&current_pcb, fs_refs)?;
     }
 
     // TODO: 处理其他命名空间的 unshare 操作
@@ -235,7 +235,7 @@ mod tests {
             prepare_unshare_install(&pcb, CloneFlags::CLONE_SYSVSEM, None, None, None, &fs_refs)
                 .unwrap()
                 .unwrap();
-        prepared.commit(&pcb, &fs_refs).unwrap();
+        prepared.commit(&pcb, fs_refs).unwrap();
 
         assert!(pcb.sem_undo_group().is_none());
         let replacement = pcb.ensure_sem_undo_group(&ipc_ns).unwrap();
@@ -267,7 +267,7 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        prepared.commit(&pcb, &fs_refs).unwrap();
+        prepared.commit(&pcb, fs_refs).unwrap();
 
         assert!(pcb.sem_undo_group().is_none());
         assert!(Arc::ptr_eq(&pcb.nsproxy().ipc_ns, &new_ipc_ns));

@@ -2,7 +2,11 @@
 use super::SemUndoGroup;
 use crate::{
     ipc::sem::{SemManager, SemWakeBatch},
-    process::{pid::PidType, ProcessControlBlock},
+    process::{
+        namespace::ipc_namespace::IpcNamespace,
+        pid::{Pid, PidType},
+        ProcessControlBlock,
+    },
 };
 use alloc::sync::Arc;
 
@@ -44,56 +48,88 @@ impl Drop for SemUndoAttachment {
 }
 
 pub(crate) fn detach_sem_undo(pcb: &Arc<ProcessControlBlock>) {
-    let Some(attachment) = pcb.take_sem_undo_attachment() else {
-        return;
-    };
-    let group = attachment.group();
-    drop(attachment);
-
-    if !group.detach_owner_and_mark_last() {
-        return;
+    if let Some(replay) = PendingSemUndoReplay::detach(pcb) {
+        replay.replay();
     }
-
-    replay_marked_records(pcb, &group);
 }
 
-pub(super) fn replay_marked_records(pcb: &Arc<ProcessControlBlock>, group: &Arc<SemUndoGroup>) {
-    if !group.begin_replay() {
-        return;
+/// Logical detachment may happen under publication locks; actual replay must not.
+/// Pin the old namespace and actor before publishing new task namespace state.
+/// Execution is explicit: dropping this context never runs semaphore operations.
+#[must_use = "detached final-owner undo debt must be replayed explicitly"]
+pub(crate) struct PendingSemUndoReplay {
+    group: Arc<SemUndoGroup>,
+    ipc_ns: Option<Arc<IpcNamespace>>,
+    actor: Option<Arc<Pid>>,
+}
+
+impl PendingSemUndoReplay {
+    pub(crate) fn detach(pcb: &Arc<ProcessControlBlock>) -> Option<Self> {
+        let attachment = pcb.take_sem_undo_attachment()?;
+        let group = attachment.group();
+        drop(attachment);
+        if !group.detach_owner_and_mark_last() {
+            return None;
+        }
+        Some(Self::new(pcb, group))
     }
-    let exiting_tgid = pcb.try_active_pid_ns().and_then(|pid_ns| {
-        pcb.task_pid_nr_ns(PidType::TGID, Some(pid_ns))
-            .filter(|tgid| tgid.data() != 0)?;
-        pcb.task_pid_ptr(PidType::TGID)
-    });
 
-    let Some(ipc_ns) = group.ipc_ns.upgrade() else {
-        drop(group.discard_retired_records());
-        return;
-    };
+    fn new(pcb: &Arc<ProcessControlBlock>, group: Arc<SemUndoGroup>) -> Self {
+        let ipc_ns = group.ipc_ns.upgrade();
+        let actor = pcb.try_active_pid_ns().and_then(|pid_ns| {
+            pcb.task_pid_nr_ns(PidType::TGID, Some(pid_ns))
+                .filter(|tgid| tgid.data() != 0)?;
+            pcb.task_pid_ptr(PidType::TGID)
+        });
+        Self {
+            group,
+            ipc_ns,
+            actor,
+        }
+    }
 
-    loop {
-        let mut wakes = SemWakeBatch::default();
-        let record = {
-            let mut manager = ipc_ns.sem.lock();
-            let Some(record) = group.pop_retired_record() else {
-                break;
-            };
-            SemManager::replay_sem_undo_adjustments(
-                &mut manager,
-                record.semid,
-                &record.adjustments,
-                exiting_tgid.clone(),
-                &mut wakes,
-            );
-            manager.unregister_undo_group(record.semid, group);
-            record
+    pub(crate) fn replay(self) {
+        let Self {
+            group,
+            ipc_ns,
+            actor,
+        } = self;
+        if !group.begin_replay() {
+            return;
+        }
+        let Some(ipc_ns) = ipc_ns else {
+            drop(group.discard_retired_records());
+            return;
         };
-        // Publish and notify one set at a time, like Linux exit_sem. Pending
-        // records stay in the group so interleaved semctl still clears them.
-        wakes.wake_all();
-        SemManager::shrink_undo_registry(&ipc_ns, record.semid);
+
+        loop {
+            let mut wakes = SemWakeBatch::default();
+            let record = {
+                let mut manager = ipc_ns.sem.lock();
+                let Some(record) = group.pop_retired_record() else {
+                    break;
+                };
+                SemManager::replay_sem_undo_adjustments(
+                    &mut manager,
+                    record.semid,
+                    &record.adjustments,
+                    actor.clone(),
+                    &mut wakes,
+                );
+                manager.unregister_undo_group(record.semid, &group);
+                record
+            };
+            // Publish and notify one set at a time, like Linux exit_sem. Pending
+            // records stay in the group so interleaved semctl still clears them.
+            wakes.wake_all();
+            SemManager::shrink_undo_registry(&ipc_ns, record.semid);
+        }
     }
+}
+
+#[cfg(test)]
+pub(super) fn replay_marked_records(pcb: &Arc<ProcessControlBlock>, group: &Arc<SemUndoGroup>) {
+    PendingSemUndoReplay::new(pcb, group.clone()).replay();
 }
 
 impl UnpublishedSemUndoAttachmentGuard {

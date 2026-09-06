@@ -1690,6 +1690,32 @@ TEST(SysVSem, SemUndoUnshareSysvsem) {
         << "last old shared owner replays old-group debt after its release";
 }
 
+TEST(SysVSem, MultiSetUnshareCompletesReplayBeforeReturning) {
+    std::vector<std::unique_ptr<SemSet>> sets;
+    for (int i = 0; i < 128; ++i) {
+        sets.emplace_back(new SemSet(1, IPC_CREAT | 0600));
+        ASSERT_TRUE(sets.back()->valid());
+    }
+    pid_t pid = fork();
+    ASSERT_GE(pid, 0);
+    if (pid == 0) {
+        for (int round = 1; round <= 2; ++round) {
+            for (auto& sem : sets)
+                if (!SemUndoOpMustSucceed(sem->id(), 0, round)) _exit(188);
+            if (unshare(CLONE_SYSVSEM) != 0) _exit(189);
+            // Check in the live caller, not only after exit could replay debt.
+            for (auto& sem : sets) {
+                if (SemCtl(sem->id(), 0, GETVAL, 0) != 0 ||
+                    SemCtl(sem->id(), 0, GETPID, 0) != getpid()) _exit(190);
+            }
+        }
+        _exit(0);
+    }
+    ChildGuard child(pid);
+    WaitChildOk(&child);
+    for (auto& sem : sets) EXPECT_EQ(0, SemCtl(sem->id(), 0, GETVAL, 0));
+}
+
 struct NamespaceUndoReport {
     int setns_result;
     int setns_errno;

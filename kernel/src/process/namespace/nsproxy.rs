@@ -4,7 +4,7 @@ use system_error::SystemError;
 
 use crate::{
     filesystem::{fs::FsStruct, vfs::IndexNode},
-    ipc::sem_undo::detach_sem_undo,
+    ipc::sem_undo::PendingSemUndoReplay,
     process::{
         cred::Cred,
         fork::CloneFlags,
@@ -294,7 +294,7 @@ pub fn exec_task_namespaces() -> Result<(), SystemError> {
     let fs_refs = crate::process::lock_fs_refs_copy();
     let prepared =
         PreparedNamespaceInstall::prepare_for_setns(&tsk, new_nsproxy, None, false, &fs_refs)?;
-    prepared.commit(&tsk, &fs_refs)?;
+    prepared.commit(&tsk, fs_refs)?;
 
     return Ok(());
 }
@@ -408,7 +408,7 @@ impl PreparedNamespaceInstall {
     pub(crate) fn commit(
         self,
         tsk: &Arc<ProcessControlBlock>,
-        fs_refs: &FsRefsReadGuard,
+        fs_refs: FsRefsReadGuard,
     ) -> Result<(), SystemError> {
         let Self {
             new_nsproxy,
@@ -418,14 +418,22 @@ impl PreparedNamespaceInstall {
             nsproxy_retire,
             cred_retire,
         } = self;
-        if detach_sysvsem {
-            detach_sem_undo(tsk);
-        }
+        let undo_replay = if detach_sysvsem {
+            PendingSemUndoReplay::detach(tsk)
+        } else {
+            None
+        };
         if let Some(new_fs) = new_fs {
-            tsk.set_fs_struct(new_fs, fs_refs);
+            tsk.set_fs_struct(new_fs, &fs_refs);
         }
         let prepared_cred = new_cred.zip(cred_retire);
         tsk.install_prepared_namespace_state(new_nsproxy, nsproxy_retire, prepared_cred);
+        // Keep copy-to-publication atomic against pivot_root, but do not make
+        // unrelated fs topology writers wait for semaphore replay/wakeup work.
+        drop(fs_refs);
+        if let Some(replay) = undo_replay {
+            replay.replay();
+        }
         Ok(())
     }
 }
@@ -474,7 +482,7 @@ mod tests {
         )
         .unwrap();
 
-        prepared.commit(&pcb, &fs_refs).unwrap();
+        prepared.commit(&pcb, fs_refs).unwrap();
         assert!(Arc::ptr_eq(&pcb.nsproxy(), &new_nsproxy));
         assert!(Arc::ptr_eq(&pcb.cred(), &old_cred));
     }
@@ -557,7 +565,7 @@ mod tests {
         .unwrap();
         let unprepared_before = pcb.namespace_unprepared_rcu_stores_for_test();
 
-        prepared.commit(&pcb, &fs_refs).unwrap();
+        prepared.commit(&pcb, fs_refs).unwrap();
 
         assert_eq!(
             pcb.namespace_unprepared_rcu_stores_for_test(),
