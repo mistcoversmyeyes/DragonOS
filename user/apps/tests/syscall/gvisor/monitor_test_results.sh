@@ -123,8 +123,8 @@ check_qemu_alive() {
 
 # 检查系统是否已启动
 check_boot_complete() {
-    [ -f "$SERIAL_FILE" ] && (grep -aq "[rcS] Running system init script..." "$SERIAL_FILE" 2>/dev/null || \
-                             grep -aq "开始运行gvisor系统调用测试" "$SERIAL_FILE" 2>/dev/null)
+    [ -f "$SERIAL_FILE" ] && (grep -aFq "[rcS] Running system init script..." "$SERIAL_FILE" 2>/dev/null || \
+                             grep -aFq "开始运行gvisor系统调用测试" "$SERIAL_FILE" 2>/dev/null)
 }
 
 # 检查测试是否已开始执行
