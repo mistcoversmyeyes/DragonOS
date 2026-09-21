@@ -17,7 +17,7 @@ use crate::{
 
 use super::{
     clocksource::{Clocksource, ClocksourceMask},
-    syscall::PosixTimeval,
+    syscall::{PosixSusecondsT, PosixTimeval},
     NSEC_PER_SEC,
 };
 
@@ -372,7 +372,7 @@ pub fn do_gettimeofday() -> PosixTimeval {
     let tp = realtime_now();
     PosixTimeval {
         tv_sec: tp.tv_sec,
-        tv_usec: (tp.tv_nsec / 1000) as i32,
+        tv_usec: (tp.tv_nsec / 1000) as PosixSusecondsT,
     }
 }
 

@@ -1,4 +1,4 @@
-use core::ffi::{c_int, c_longlong};
+use core::ffi::{c_int, c_long, c_longlong};
 use system_error::SystemError;
 
 use crate::syscall::Syscall;
@@ -24,7 +24,9 @@ mod sys_timer_settime;
 pub(crate) use posix_clock::{posix_clock_now, posix_clock_res};
 
 pub type PosixTimeT = c_longlong;
-pub type PosixSusecondsT = c_int;
+// Native Linux timeval uses a signed long for microseconds. A 32-bit field
+// leaves padding that 64-bit userspace would read as the upper half of tv_usec.
+pub type PosixSusecondsT = c_long;
 
 #[repr(C)]
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq)]

@@ -7,7 +7,7 @@ use crate::{
         user_access::{UserBufferReader, UserBufferWriter},
     },
     time::{
-        syscall::{ItimerType, Itimerval, PosixTimeval},
+        syscall::{ItimerType, Itimerval, PosixSusecondsT, PosixTimeval},
         timer::{self, Jiffies, Timer, TimerFunction},
     },
 };
@@ -33,7 +33,8 @@ impl ItimerType {
                         let remaining_jiffies = Jiffies::new(expires - now);
                         let remaining_duration = Duration::from(remaining_jiffies);
                         old_itv.it_value.tv_sec = remaining_duration.as_secs() as i64;
-                        old_itv.it_value.tv_usec = remaining_duration.subsec_micros() as i32;
+                        old_itv.it_value.tv_usec =
+                            remaining_duration.subsec_micros() as PosixSusecondsT;
                     }
                 }
                 old_itv
