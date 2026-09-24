@@ -14,7 +14,7 @@ echo "=== Running fifo_lat test ==="
 if [ "${LMBENCH_FIFO_CLEANUP:-0}" = 1 ]; then
     run_lmbench_measurement "${LMBENCH_SH:-sh}" "$SCRIPT_DIR/../fifo_cleanup.sh" "$LMBENCH_BIN_DIR/lat_fifo"
 else
-    run_lmbench_measurement "$LMBENCH_BIN_DIR/lat_fifo" -P 1
+    run_lmbench_measurement "$SCRIPT_DIR/../helpers/lat_fifo" -P 1
 fi
 
 if [ $? -eq 0 ]; then

@@ -10,11 +10,19 @@ let
     sha256 = "sha256-/iP7oKc2n0CXpA0OgVQX86quNfbtjXBZ83RBl1MEBhE=";
   };
 
+  fifoSource = pkgs.fetchurl {
+    url = "https://deb.debian.org/debian/pool/non-free/l/lmbench/lmbench_3.0-a9+debian.1.orig.tar.gz";
+    sha256 = "cbd5777d15f44eab7666dcac418054c3c09df99826961a397d9acf43d8a2a551";
+  };
+
   testScript = pkgs.stdenv.mkDerivation {
     pname = "lmbench-test-script";
     version = "3.0-a9";
 
     src = lib.sourceByRegex ./. [
+      "^Makefile$"
+      "^upstream"
+      "^upstream/.*"
       "^runner"
       "^runner/.*\.sh$"
       "^runner/test_cases"
@@ -23,6 +31,11 @@ let
       "^whitelist\.txt$"
     ];
 
+    nativeBuildInputs = [ pkgs.pkg-config pkgs.patch ];
+    buildInputs = [ pkgs.libtirpc ];
+    LMBENCH_SOURCE_ARCHIVE = fifoSource;
+    buildPhase = "make build";
+
     installPhase = ''
       mkdir -p $out/${installDir}
 
@@ -30,6 +43,9 @@ let
       install -m644 config whitelist.txt $out/${installDir}/
       cp -r runner/test_cases $out/${installDir}/
       chmod +x $out/${installDir}/test_cases/*.sh
+      mkdir -p $out/${installDir}/helpers
+      install -m755 build/fifo/lat_fifo $out/${installDir}/helpers/
+      install -m644 build/fifo/COPYING.lmbench build/fifo/lat_fifo-cleanup.patch build/fifo/build-info.txt $out/${installDir}/helpers/
     '';
   };
 

@@ -22,7 +22,7 @@ source-path = "user/apps/tests/benchmark/lmbench"
 
 # 构建相关信息
 [build]
-# 仅安装 shell 脚本/元数据到 rootfs（无需编译）
+# 编译修复生命周期的 FIFO helper，并安装脚本/元数据
 build-command = "make install"
 
 # 安装相关信息
