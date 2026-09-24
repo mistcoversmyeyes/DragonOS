@@ -1,0 +1,35 @@
+--- a/src/lat_fifo.c
++++ b/src/lat_fifo.c
+@@ -88,6 +88,8 @@
+ 	handle_scheduler(benchmp_childid(), 0, 1);
+ 	switch (state->pid = fork()) {
+ 	    case 0:
++		/* The writer must not inherit benchmp's SIGTERM handler. */
++		signal(SIGTERM, SIG_DFL);
+ 		handle_scheduler(benchmp_childid(), 1, 1);
+ 		state->rd = open(state->filename1, O_RDONLY);
+ 		state->wr = open(state->filename2, O_WRONLY);
+@@ -120,16 +122,17 @@
+ 
+ 	if (iterations) return;
+ 
+-	unlink(state->filename1);
+-	unlink(state->filename2);
+-	close(state->wr);
+-	close(state->rd);
+-
++	/* Stop the writer before closing its peer and causing EOF. */
+ 	if (state->pid > 0) {
+-		kill(state->pid, 15);
++		kill(state->pid, SIGTERM);
+ 		waitpid(state->pid, NULL, 0);
+ 		state->pid = 0;
+ 	}
++
++	unlink(state->filename1);
++	unlink(state->filename2);
++	close(state->wr);
++	close(state->rd);
+ }
+ 
+ void 
