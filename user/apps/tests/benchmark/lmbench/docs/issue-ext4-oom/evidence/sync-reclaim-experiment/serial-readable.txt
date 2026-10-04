@@ -1,0 +1,264 @@
+
+[rcS] Running system init script...
+ ____                                      ___   ____ 
+|  _ \  _ __   __ _   __ _   ___   _ __   / _ \ / ___| 
+| | | || '__| / _` | / _` | / _ \ | '_ \ | | | |\___ \  
+| |_| || |   | (_| || (_| || (_) || | | || |_| | ___) |
+|____/ |_|    \__,_| \__, | \___/ |_| |_| \___/ |____/ 
+                     |___/     
+ DragonOS - Lightweight Cloud-Native Kernel
+ Copyright: DragonOS Community. 2022-2026, All rights reserved.
+ Version: #80-dragonos-0.4.0 Fri Oct 02 16:54:47 UTC 2026
+ 
+You can visit the project via:
+
+    Official Website: https://DragonOS.org
+    GitHub: https://github.com/DragonOS-Community/DragonOS
+
+ Maintainer: longjin <longjin@DragonOS.org>
+ Get contact with the community: <contact@DragonOS.org>
+
+ Welcome to join our development community on GitHub!
+
+[rcS] apt detected, switching Ubuntu 24.04 apt sources to USTC...
+
+Please press Enter to activate this console. root@dragonos:~# stty -echo; printf '\n__HOST_DONE_echo__\n'
+
+__HOST_DONE_echo__
+root@dragonos:~# Linux dragonos 6.6.21-dragonos #80-dragonos-0.4.0 Fri Oct 02 16:54:47 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+console=/dev/hvc0  rw  init=/bin/busybox init AUTO_TEST=none SYSCALL_TEST_DIR=/opt/tests/gvisor DUNITEST_DIR=/opt/tests/dunitest DUNITEST_PATTERN= BENCHMARK_TEST_DIR=/opt/tests/benchmark/lmbench  loglevel=4
+proc /proc proc rw 0 0
+devtmpfs /dev devtmpfs rw 0 0
+tmpfs /dev/shm tmpfs rw,nosuid,nodev,noexec,mode=1777 0 0
+sysfs /sys sysfs rw 0 0
+cgroup2 /sys/fs/cgroup cgroup2 rw 0 0
+ext4 / ext4 rw,relatime 0 0
+devpts /dev/pts devpts rw 0 0
+tmpfs /tmp tmpfs rw,relatime 0 0
+tmpfs /run tmpfs rw,relatime 0 0
+ls: cannot access '/ext4': No such file or directory
+ls: /tmp: Function not implemented
+drwxrwxrwx 2 root root 0 Jan  1  1970 /tmp
+-rwxr-xr-x 1 1000 1000 16199 Oct  1 16:27 /opt/tests/benchmark/lmbench/run.sh
+eebda4809b2673004efa12cea757b1563b069bbbe0e197d00d212948aeaf561f  /opt/tests/benchmark/lmbench/run.sh
+dba71f1659cda485df48d31e938f86e9602bb2c5918567bb31eaa8693ffb6d85  /opt/tests/benchmark/lmbench/init.sh
+6bb209e684cfa7e2b4391d174ea78e6ab0602029208d96c903c68d7bf030a55c  /opt/tests/benchmark/lmbench/test_cases/ext4_create_delete_files_10k_ops.sh
+
+__HOST_DONE_preflight__
+root@dragonos:~# 
+__HOST_DONE_cd__
+root@dragonos:/opt/tests/benchmark/lmbench# 
+__OBS_baseline__
+MemTotal:	2069836 kB
+MemFree:	2045860 kB
+Buffers:	0 kB
+Cached:		2928 kB
+SwapTotal:	0 kB
+SwapFree:	0 kB
+Dirty:		28 kB
+Writeback:	0 kB
+Mapped:		1448 kB
+Shmem:		12 kB
+Slab:		14636 kB
+SReclaimable:	0 kB
+SUnreclaim:	14636 kB
+Filesystem     1K-blocks   Used Available Use% Mounted on
+ext4             2024296 469360   1450132  25% /
+ext4             2024296 469360   1450132  25% /
+tmpfs            1034916      0   1034916   0% /tmp
+Filesystem     Inodes IUsed  IFree IUse% Mounted on
+ext4           131072  6694 124378    6% /
+ext4           131072  6694 124378    6% /
+tmpfs               0     0      0     - /tmp
+
+__HOST_DONE_obs_baseline__
+root@dragonos:/opt/tests/benchmark/lmbench# [lmbench-runner] LMbench benchmark run starting
+===LMBENCH_RUN_BEGIN===
+LMBENCH_META {"suite":"lmbench","suite_version":"3.0-a9","samples":1,"timeout_sec":120,"warmup":0}
+[lmbench-runner] initializing test environment (init.sh)...
+64+0 records in
+64+0 records out
+67108864 bytes (67 MB, 64 MiB) copied, 0.121804 s, 551 MB/s
+64+0 records in
+64+0 records out
+67108864 bytes (67 MB, 64 MiB) copied, 0.156475 s, 429 MB/s
+64+0 records in
+64+0 records out
+67108864 bytes (67 MB, 64 MiB) copied, 0.091378 s, 734 MB/s
+64+0 records in
+64+0 records out
+67108864 bytes (67 MB, 64 MiB) copied, 0.0951525 s, 705 MB/s
+lmbench test environment initialized
+[lmbench-runner] ENOUGH=1000000 (calibrated by enough tool)
+[lmbench-runner] dispatching ext4_create_delete_files_10k_ops
+[lmbench-runner] loading metadata for ext4_create_delete_files_10k_ops
+[lmbench-runner] RUN  ext4_create_delete_files_10k_ops (samples=1, timeout=120s)
+LMBENCH_JSON {"name":"ext4_create_delete_files_10k_ops","category":"filesystem","binary":"lat_fs","metric_type":"ops","unit":"ops/sec","bigger_is_better":true,"description":"ext4 create+delete throughput for 10k-byte files via lat_fs","status":"ok","samples":[1622],"stats":{"count":1,"mean":1622.000000,"median":1622.000000,"stddev":0.000000,"min":1622.000000,"max":1622.000000,"cv":0.000000}}
+[lmbench-runner] OK   ext4_create_delete_files_10k_ops: mean=1622.000000 ops/sec (n=1, cv=0.000000)
+---
+LMBENCH_SUMMARY {"total":1,"ok":1,"failed":0,"skipped":0}
+===LMBENCH_RUN_END===
+[lmbench-runner] done: total=1 ok=1 failed=0 skipped=0
+lmbench test environment cleaned
+benchmark测试完成
+
+__RUN_DONE_1_RC_0__
+root@dragonos:/opt/tests/benchmark/lmbench# 
+__OBS_idle_0__
+MemTotal:	2069836 kB
+MemFree:	1462900 kB
+Buffers:	0 kB
+Cached:		246704 kB
+SwapTotal:	0 kB
+SwapFree:	0 kB
+Dirty:		241384 kB
+Writeback:	0 kB
+Mapped:		1524 kB
+Shmem:		24 kB
+Slab:		353508 kB
+SReclaimable:	0 kB
+SUnreclaim:	353508 kB
+Filesystem     1K-blocks   Used Available Use% Mounted on
+ext4             2024296 469364   1450128  25% /
+ext4             2024296 469364   1450128  25% /
+tmpfs            1034916     12   1034904   1% /tmp
+Filesystem     Inodes IUsed  IFree IUse% Mounted on
+ext4           131072 26807 104265   21% /
+ext4           131072 26807 104265   21% /
+tmpfs               0     0      0     - /tmp
+
+__HOST_DONE_obs_idle_0__
+root@dragonos:/opt/tests/benchmark/lmbench# 
+__OBS_idle_15__
+MemTotal:	2069836 kB
+MemFree:	1463460 kB
+Buffers:	0 kB
+Cached:		246416 kB
+SwapTotal:	0 kB
+SwapFree:	0 kB
+Dirty:		241096 kB
+Writeback:	0 kB
+Mapped:		1524 kB
+Shmem:		24 kB
+Slab:		353236 kB
+SReclaimable:	0 kB
+SUnreclaim:	353236 kB
+Filesystem     1K-blocks   Used Available Use% Mounted on
+ext4             2024296 469364   1450128  25% /
+ext4             2024296 469364   1450128  25% /
+tmpfs            1034916     12   1034904   1% /tmp
+Filesystem     Inodes IUsed  IFree IUse% Mounted on
+ext4           131072 26783 104289   21% /
+ext4           131072 26783 104289   21% /
+tmpfs               0     0      0     - /tmp
+
+__HOST_DONE_obs_idle_15__
+root@dragonos:/opt/tests/benchmark/lmbench# 
+__OBS_idle_30__
+MemTotal:	2069836 kB
+MemFree:	1463956 kB
+Buffers:	0 kB
+Cached:		246128 kB
+SwapTotal:	0 kB
+SwapFree:	0 kB
+Dirty:		240808 kB
+Writeback:	0 kB
+Mapped:		1524 kB
+Shmem:		24 kB
+Slab:		353028 kB
+SReclaimable:	0 kB
+SUnreclaim:	353028 kB
+Filesystem     1K-blocks   Used Available Use% Mounted on
+ext4             2024296 469364   1450128  25% /
+ext4             2024296 469364   1450128  25% /
+tmpfs            1034916     12   1034904   1% /tmp
+Filesystem     Inodes IUsed  IFree IUse% Mounted on
+ext4           131072 26759 104313   21% /
+ext4           131072 26759 104313   21% /
+tmpfs               0     0      0     - /tmp
+
+__HOST_DONE_obs_idle_30__
+root@dragonos:/opt/tests/benchmark/lmbench# 
+__OBS_idle_60__
+MemTotal:	2069836 kB
+MemFree:	1464976 kB
+Buffers:	0 kB
+Cached:		245552 kB
+SwapTotal:	0 kB
+SwapFree:	0 kB
+Dirty:		240232 kB
+Writeback:	0 kB
+Mapped:		1524 kB
+Shmem:		24 kB
+Slab:		352584 kB
+SReclaimable:	0 kB
+SUnreclaim:	352584 kB
+Filesystem     1K-blocks   Used Available Use% Mounted on
+ext4             2024296 469364   1450128  25% /
+ext4             2024296 469364   1450128  25% /
+tmpfs            1034916     12   1034904   1% /tmp
+Filesystem     Inodes IUsed  IFree IUse% Mounted on
+ext4           131072 26711 104361   21% /
+ext4           131072 26711 104361   21% /
+tmpfs               0     0      0     - /tmp
+
+__HOST_DONE_obs_idle_60__
+root@dragonos:/opt/tests/benchmark/lmbench# 
+__SYNC_DONE_RC_0__
+root@dragonos:/opt/tests/benchmark/lmbench# 
+__OBS_post_sync_0__
+MemTotal:	2069836 kB
+MemFree:	1941840 kB
+Buffers:	0 kB
+Cached:		5396 kB
+SwapTotal:	0 kB
+SwapFree:	0 kB
+Dirty:		0 kB
+Writeback:	0 kB
+Mapped:		1528 kB
+Shmem:		24 kB
+Slab:		115644 kB
+SReclaimable:	0 kB
+SUnreclaim:	115644 kB
+Filesystem     1K-blocks   Used Available Use% Mounted on
+ext4             2024296 469376   1450116  25% /
+ext4             2024296 469376   1450116  25% /
+tmpfs            1034916     12   1034904   1% /tmp
+Filesystem     Inodes IUsed  IFree IUse% Mounted on
+ext4           131072  6695 124377    6% /
+ext4           131072  6695 124377    6% /
+tmpfs               0     0      0     - /tmp
+
+__HOST_DONE_obs_post_sync_0__
+root@dragonos:/opt/tests/benchmark/lmbench# 
+__OBS_post_sync_30__
+MemTotal:	2069836 kB
+MemFree:	1941852 kB
+Buffers:	0 kB
+Cached:		5396 kB
+SwapTotal:	0 kB
+SwapFree:	0 kB
+Dirty:		0 kB
+Writeback:	0 kB
+Mapped:		1528 kB
+Shmem:		24 kB
+Slab:		115632 kB
+SReclaimable:	0 kB
+SUnreclaim:	115632 kB
+Filesystem     1K-blocks   Used Available Use% Mounted on
+ext4             2024296 469376   1450116  25% /
+ext4             2024296 469376   1450116  25% /
+tmpfs            1034916     12   1034904   1% /tmp
+Filesystem     Inodes IUsed  IFree IUse% Mounted on
+ext4           131072  6695 124377    6% /
+ext4           131072  6695 124377    6% /
+tmpfs               0     0      0     - /tmp
+
+__HOST_DONE_obs_post_sync_30__
+root@dragonos:/opt/tests/benchmark/lmbench# 0
+=== Running ext4_create_delete_files_10k_ops test ===
+10k	2108	1622	3884
+Test completed successfully
+
+__HOST_DONE_raw_1__
+root@dragonos:/opt/tests/benchmark/lmbench# 

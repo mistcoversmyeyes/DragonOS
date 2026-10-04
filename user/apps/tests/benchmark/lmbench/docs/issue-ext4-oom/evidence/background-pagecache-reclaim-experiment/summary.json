@@ -1,0 +1,99 @@
+{
+  "case": "ext4_create_delete_files_10k_ops",
+  "planned_rounds": 1,
+  "completed_rounds": 1,
+  "ok_rounds": 1,
+  "status": "user_stopped",
+  "artifact_rebuilt": false,
+  "rounds": [
+    {
+      "round": 1,
+      "rc": 0,
+      "ok": true,
+      "duration_sec": 57.61031890503364,
+      "metrics": [
+        {
+          "name": "ext4_create_delete_files_10k_ops",
+          "category": "filesystem",
+          "binary": "lat_fs",
+          "metric_type": "ops",
+          "unit": "ops/sec",
+          "bigger_is_better": true,
+          "description": "ext4 create+delete throughput for 10k-byte files via lat_fs",
+          "status": "ok",
+          "samples": [
+            2831
+          ],
+          "stats": {
+            "count": 1,
+            "mean": 2831.0,
+            "median": 2831.0,
+            "stddev": 0.0,
+            "min": 2831.0,
+            "max": 2831.0,
+            "cv": 0.0
+          }
+        }
+      ]
+    }
+  ],
+  "baseline": {
+    "elapsed_sec": -57.610319,
+    "MemFree_KiB": 2045876,
+    "Cached_KiB": 2928,
+    "Dirty_KiB": 28,
+    "Slab_KiB": 14620,
+    "Shmem_KiB": 12,
+    "Inodes": 131072,
+    "IUsed": 6694,
+    "IFree": 124378
+  },
+  "sample_count": 563,
+  "runner_returned_host_elapsed_sec": 59.63601552101318,
+  "latest_sample": {
+    "elapsed_sec": 8430.000142,
+    "MemFree_KiB": 1694048,
+    "Cached_KiB": 113756,
+    "Dirty_KiB": 108396,
+    "Slab_KiB": 255108,
+    "Shmem_KiB": 24,
+    "Inodes": 131072,
+    "IUsed": 15728,
+    "IFree": 115344,
+    "sample_duration_sec": 0.008394,
+    "inode_gap": 9034,
+    "dirty_delta_KiB": 108368,
+    "dirty_minus_gap12_KiB": -40,
+    "reclaim_inodes_per_sec": 1.600004
+  },
+  "natural_elapsed_sec": 8430.000142,
+  "near_baseline_since_sec": null,
+  "recent_reclaim_inodes_per_sec": 1.6266687813360783,
+  "error": null,
+  "current_round": 1,
+  "elapsed_sec": 8494.174859716964,
+  "natural_recovery_complete": false,
+  "stop_reason": "User requested stopping with existing data; no sync or extra guest cleanup",
+  "stopped_natural_elapsed_sec": 8434.538844195951,
+  "analysis": {
+    "samples": 563,
+    "observed_duration_sec": 8429.99906,
+    "last_sample_elapsed_sec": 8430.000142,
+    "baseline_IFree": 124378,
+    "initial_IFree": 101401,
+    "final_IFree": 115344,
+    "final_inode_gap": 9034,
+    "reclaimed_inodes": 13943,
+    "average_reclaim_inodes_per_sec": 1.6539740871572528,
+    "linear_fit_inodes_per_sec": 1.6545282088702287,
+    "linear_fit_R_squared": 0.9999972107412777,
+    "sample_interval_min_sec": 14.985486999999921,
+    "sample_interval_max_sec": 15.01429700000017,
+    "max_sample_duration_sec": 0.050116,
+    "dirty_gap_difference_min_KiB": -136,
+    "dirty_gap_difference_max_KiB": 0,
+    "measured_only": true,
+    "natural_recovery_complete": false,
+    "stop_reason": "user_stopped"
+  }
+}

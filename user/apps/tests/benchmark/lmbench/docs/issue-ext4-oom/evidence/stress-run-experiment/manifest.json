@@ -1,0 +1,18 @@
+{
+  "source_head": "3ffc8327522dbd650505015202dce35fee545ef8",
+  "artifact_rebuilt": true,
+  "kind": "ext4",
+  "kernel_sha256": "c5f7d17a44079a8f9e3640fbf810657d6fbf5533d95a90e475c05872c1a2dff9",
+  "base_disk_sha256": "2ddae2541b45ecf7698a449630ef4781770c4fae325b7ffb70214cd068831675",
+  "disk_origin": "fresh project write_diskimage from ubuntu2404 and existing matching sysroot",
+  "fixture_layout": "ext4 directory on root ext4; tmp on tmpfs",
+  "attempt_id": "attempt-20261002T165926Z",
+  "archive_note": "Host filesystem paths are omitted; measurements and artifact identities are unchanged.",
+  "platform": "x86_64",
+  "guest_memory": "2G",
+  "guest_vcpus": 2,
+  "accelerator": "kvm",
+  "disk_snapshot": true,
+  "runner_command": "sh run.sh --only ext4_create_delete_files_10k_ops --samples 1 --timeout 120 --warmup 0",
+  "guest_runner_sha256": "eebda4809b2673004efa12cea757b1563b069bbbe0e197d00d212948aeaf561f"
+}

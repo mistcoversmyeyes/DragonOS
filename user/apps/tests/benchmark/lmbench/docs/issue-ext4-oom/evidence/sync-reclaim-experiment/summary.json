@@ -1,0 +1,47 @@
+{
+  "case": "ext4_create_delete_files_10k_ops",
+  "planned_rounds": 1,
+  "completed_rounds": 1,
+  "ok_rounds": 1,
+  "status": "completed",
+  "artifact_rebuilt": false,
+  "rounds": [
+    {
+      "round": 1,
+      "rc": 0,
+      "ok": true,
+      "duration_sec": 48.90290050499607,
+      "metrics": [
+        {
+          "name": "ext4_create_delete_files_10k_ops",
+          "category": "filesystem",
+          "binary": "lat_fs",
+          "metric_type": "ops",
+          "unit": "ops/sec",
+          "bigger_is_better": true,
+          "description": "ext4 create+delete throughput for 10k-byte files via lat_fs",
+          "status": "ok",
+          "samples": [
+            1622
+          ],
+          "stats": {
+            "count": 1,
+            "mean": 1622.0,
+            "median": 1622.0,
+            "stddev": 0.0,
+            "min": 1622.0,
+            "max": 1622.0,
+            "cv": 0.0
+          }
+        }
+      ]
+    }
+  ],
+  "sync": {
+    "returned": true,
+    "rc": 0,
+    "duration_sec": 133.73588539403863,
+    "host_deadline_sec": 180
+  },
+  "elapsed_sec": 277.4086937120301
+}

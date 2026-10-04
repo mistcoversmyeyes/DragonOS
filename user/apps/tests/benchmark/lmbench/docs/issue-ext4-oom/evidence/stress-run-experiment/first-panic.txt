@@ -1,0 +1,27 @@
+Kernel Panic Occurred. raw_pid: 174
+Location:
+	File: src/mm/allocator/kernel_allocator.rs
+	Line: 247, Column: 5
+Message:
+	global_alloc_error, layout: Layout { size: 4096, align: 1 (1 << 0) }
+Rust Panic Backtrace:
+[1] function:_Unwind_Backtrace() 	(+) 0051 address:0xffff800000c61eb3
+[2] function:dragonos_kernel::debug::panic::hook::print_stack_trace() 	(+) 0228 address:0xffff800000bfd044
+[3] function:__rustc::rust_begin_unwind() 	(+) 0541 address:0xffff800000ae73dd
+[4] function:core::panicking::panic_fmt() 	(+) 0044 address:0xffff800000d9a61c
+[5] function:dragonos_kernel::mm::allocator::kernel_allocator::global_alloc_err_handler() 	(+) 0061 address:0xffff80000084e16d
+[6] function:__rustc::__rust_alloc_error_handler() 	(+) 0015 address:0xffff800000818a7f
+[7] function:alloc::alloc::handle_alloc_error() 	(+) 0016 address:0xffff800000d8a9b9
+[8] function:<another_ext4::ext4::Ext4>::create_inode_with_metadata() 	(+) 8451 address:0xffff800000d2b5b3
+[9] function:<another_ext4::ext4::Ext4>::create_with_owner_and_attr() 	(+) 1282 address:0xffff800000d39af2
+[10] function:<dragonos_kernel::filesystem::ext4::inode::LockedExt4Inode as dragonos_kernel::filesystem::vfs::IndexNode>::create() 	(+) 1511 address:0xffff80000046a057
+[11] function:<dragonos_kernel::filesystem::vfs::mount::MountFSInode>::create_file_with_post_commit::<dragonos_kernel::filesystem::vfs::open::do_sys_openat2::{closure#0}::{closure#1}>() 	(+) 0392 address:0xffff8000002e91c8
+[12] function:dragonos_kernel::filesystem::vfs::open::do_sys_openat2() 	(+) 6225 address:0xffff800000b06341
+[13] function:dragonos_kernel::filesystem::vfs::syscall::open_utils::do_open() 	(+) 0214 address:0xffff8000009e4fb6
+[14] function:<dragonos_kernel::filesystem::vfs::syscall::sys_creat::SysCreatHandle as dragonos_kernel::syscall::table::Syscall>::handle() 	(+) 0031 address:0xffff800000b22a9f
+[15] function:<dragonos_kernel::syscall::Syscall>::handle() 	(+) 0674 address:0xffff800000303852
+[16] function:dragonos_kernel::debug::panic::kernel_catch_unwind::<core::result::Result<usize, system_error::SystemError>, <dragonos_kernel::syscall::Syscall>::catch_handle::{closure#0}>() 	(+) 0060 address:0xffff800000adf07c
+[17] function:syscall_handler() 	(+) 0197 address:0xffff800000ac6c35
+[18] function:syscall_64() 	(+) 0119 address:0xffff800000148856
+[ ERROR ] (src/debug/panic/mod.rs:109)	 Catch Unwind Error: Any { .. }
+[ ERROR ] (src/debug/panic/mod.rs:44)	 
