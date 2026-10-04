@@ -1,0 +1,21 @@
+{
+  "samples": 563,
+  "observed_duration_sec": 8429.99906,
+  "last_sample_elapsed_sec": 8430.000142,
+  "baseline_IFree": 124378,
+  "initial_IFree": 101401,
+  "final_IFree": 115344,
+  "final_inode_gap": 9034,
+  "reclaimed_inodes": 13943,
+  "average_reclaim_inodes_per_sec": 1.6539740871572528,
+  "linear_fit_inodes_per_sec": 1.6545282088702287,
+  "linear_fit_R_squared": 0.9999972107412777,
+  "sample_interval_min_sec": 14.985486999999921,
+  "sample_interval_max_sec": 15.01429700000017,
+  "max_sample_duration_sec": 0.050116,
+  "dirty_gap_difference_min_KiB": -136,
+  "dirty_gap_difference_max_KiB": 0,
+  "measured_only": true,
+  "natural_recovery_complete": false,
+  "stop_reason": "user_stopped"
+}

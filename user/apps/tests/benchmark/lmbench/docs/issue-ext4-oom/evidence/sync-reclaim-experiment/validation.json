@@ -1,0 +1,33 @@
+{
+  "qemu_pid": 885630,
+  "qemu_exited": true,
+  "launcher_exit_code": 0,
+  "base_disk_sha256_after": "2ddae2541b45ecf7698a449630ef4781770c4fae325b7ffb70214cd068831675",
+  "kernel_sha256_after": "c5f7d17a44079a8f9e3640fbf810657d6fbf5533d95a90e475c05872c1a2dff9",
+  "base_disk_unchanged": true,
+  "kernel_unchanged": true,
+  "phase_markers": {
+    "baseline": 1,
+    "idle_0": 1,
+    "idle_15": 1,
+    "idle_30": 1,
+    "idle_60": 1,
+    "post_sync_0": 1,
+    "post_sync_30": 1
+  },
+  "all_phase_markers_once": true,
+  "sync_command_count": 1,
+  "native_runner_command_count": 1,
+  "panic_in_serial": false,
+  "serial_bytes": 9823,
+  "console_bytes": 9753,
+  "console_raw_matches_serial_log": false,
+  "idle_dirty_inode_relation": {
+    "idle_0": true,
+    "idle_15": true,
+    "idle_30": true,
+    "idle_60": true
+  },
+  "console_is_serial_prefix": true,
+  "serial_extra_suffix_repr": "b'\\x1b[01;32mroot@dragonos\\x1b[00m:\\x1b[01;34m/opt/tests/benchmark/lmbench\\x1b[00m# '"
+}

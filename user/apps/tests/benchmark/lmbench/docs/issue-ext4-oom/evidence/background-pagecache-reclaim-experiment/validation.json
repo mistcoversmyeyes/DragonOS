@@ -1,0 +1,23 @@
+{
+  "qemu_pid": 2094829,
+  "qemu_exited": true,
+  "launcher_exit_code": 0,
+  "base_disk_sha256_after": "2ddae2541b45ecf7698a449630ef4781770c4fae325b7ffb70214cd068831675",
+  "kernel_sha256_after": "c5f7d17a44079a8f9e3640fbf810657d6fbf5533d95a90e475c05872c1a2dff9",
+  "base_disk_unchanged": true,
+  "kernel_unchanged": true,
+  "sync_command_count": 0,
+  "native_runner_command_count": 1,
+  "panic_in_serial": false,
+  "sample_count": 563,
+  "controller_pid": 2094778,
+  "controller_exited": true,
+  "qemu_exited_now": true,
+  "all_sample_markers_once": true,
+  "sample_interval_continuous": true,
+  "status": "user_stopped",
+  "natural_recovery_complete": false,
+  "last_IFree": 115344,
+  "baseline_IFree": 124378,
+  "extra_guest_cleanup_commands": []
+}

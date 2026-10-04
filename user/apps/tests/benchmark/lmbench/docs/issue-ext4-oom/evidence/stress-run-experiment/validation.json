@@ -1,0 +1,57 @@
+{
+  "source_head": "3ffc8327522dbd650505015202dce35fee545ef8",
+  "kernel_sha256": "c5f7d17a44079a8f9e3640fbf810657d6fbf5533d95a90e475c05872c1a2dff9",
+  "base_disk_sha256_before": "2ddae2541b45ecf7698a449630ef4781770c4fae325b7ffb70214cd068831675",
+  "base_disk_sha256_after": "2ddae2541b45ecf7698a449630ef4781770c4fae325b7ffb70214cd068831675",
+  "base_disk_unchanged": true,
+  "serial_sha256": "1838211adfafbb175e8d102b705f2e9a6cc78367e8045c0d42603f151257472e",
+  "serial_bytes": 25116,
+  "rounds": [
+    {
+      "round": 1,
+      "start_offset": 4270,
+      "elapsed_sec": 1.178,
+      "end_offset": 10565,
+      "sha256": "45f191b7dd15433312aabf588788d8b699aa73a1a73dec16c57c8bb376ea9fc6"
+    },
+    {
+      "round": 2,
+      "start_offset": 10565,
+      "elapsed_sec": 57.975,
+      "end_offset": 16342,
+      "sha256": "fc5b9cacd25fb7e8c615103125b6ed8e15abcabd7c07de4423a351e3338f71bd"
+    },
+    {
+      "round": 3,
+      "start_offset": 16342,
+      "elapsed_sec": 104.347,
+      "end_offset": 25116,
+      "sha256": "3057f6fe0e6ce25aaf0a49f92acb7eddf65f74c80f4d57150b26b24bff3be0f2"
+    }
+  ],
+  "no_space_left_on_device_count": 0,
+  "global_alloc_error_count": 4,
+  "host_min_MemAvailable_kB": 3911804,
+  "host_oom_kill_delta": 0,
+  "calibration": [
+    [
+      "1000000",
+      "calibrated by enough tool"
+    ],
+    [
+      "1000000",
+      "calibrated by enough tool"
+    ],
+    [
+      "1000000",
+      "calibrated by enough tool"
+    ]
+  ],
+  "qemu_cleanup_events": [
+    {
+      "elapsed_sec": 156.273,
+      "kind": "qemu_terminated",
+      "pid": 1485084
+    }
+  ]
+}
